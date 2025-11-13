@@ -1,0 +1,23 @@
+services:
+  emulator:
+    container_name: "servicebus-emulator"
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    volumes:
+      - "${SERVICEBUS_EMULATOR_CONFIG_PATH:-./emulator-config.json}:/ServiceBus_Emulator/ConfigFiles/Config.json"
+    ports:
+      - "5672:5672"
+      - "5300:5300"
+    environment:
+      SQL_SERVER: mssql
+      MSSQL_SA_PASSWORD: "${SERVICEBUS_EMULATOR_MSSQL_SA_PASSWORD:-YourStrong@Passw0rd}"
+      ACCEPT_EULA: "Y"
+      SQL_WAIT_INTERVAL: ${SERVICEBUS_EMULATOR_SQL_WAIT_INTERVAL:-15}
+    depends_on:
+      - mssql
+
+  mssql:
+    container_name: "mssql"
+    image: "mcr.microsoft.com/mssql/server:2022-latest"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${SERVICEBUS_EMULATOR_MSSQL_SA_PASSWORD:-YourStrong@Passw0rd}"
