@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/fxsml/gopipe"
@@ -160,13 +161,13 @@ func (s *Subscriber[T]) processMessage(
 	msgChan chan<- *gopipe.Message[T],
 ) {
 	s.inFlightMessages.Add(1)
-	defer s.inFlightMessages.Done()
 
 	// Unmarshal message body to type T
 	var payload T
 	if err := json.Unmarshal(sbMsg.Body, &payload); err != nil {
 		// If unmarshaling fails, abandon the message
 		s.abandonMessage(ctx, receiver, sbMsg, fmt.Errorf("failed to unmarshal message: %w", err))
+		s.inFlightMessages.Done()
 		return
 	}
 
@@ -201,30 +202,20 @@ func (s *Subscriber[T]) processMessage(
 		metadata[key] = fmt.Sprintf("%v", value)
 	}
 
-	// Create message context with timeout
-	msgCtx, msgCancel := context.WithTimeout(context.Background(), s.config.MessageTimeout)
-	defer msgCancel()
-
-	// Create Ack and Nack functions
-	ackCalled := make(chan struct{})
-	nackCalled := make(chan error)
-
+	// Create Ack function that directly completes the Service Bus message
 	ackFunc := func() {
-		select {
-		case ackCalled <- struct{}{}:
-		default:
-		}
+		defer s.inFlightMessages.Done()
+		s.completeMessage(context.Background(), receiver, sbMsg)
 	}
 
+	// Create Nack function that directly abandons the Service Bus message
 	nackFunc := func(err error) {
-		select {
-		case nackCalled <- err:
-		default:
-		}
+		defer s.inFlightMessages.Done()
+		s.abandonMessage(context.Background(), receiver, sbMsg, err)
 	}
 
-	// Create gopipe message using NewMessage constructor
-	deadline, _ := msgCtx.Deadline()
+	// Create gopipe message with deadline
+	deadline := time.Now().Add(s.config.MessageTimeout)
 	msg := gopipe.NewMessage(
 		metadata,
 		payload,
@@ -236,21 +227,10 @@ func (s *Subscriber[T]) processMessage(
 	// Send message to channel
 	select {
 	case <-ctx.Done():
-		s.abandonMessage(ctx, receiver, sbMsg, ctx.Err())
+		s.abandonMessage(context.Background(), receiver, sbMsg, ctx.Err())
+		s.inFlightMessages.Done()
 		return
 	case msgChan <- msg:
-	}
-
-	// Wait for acknowledgment
-	select {
-	case <-ctx.Done():
-		s.abandonMessage(ctx, receiver, sbMsg, ctx.Err())
-	case <-msgCtx.Done():
-		s.abandonMessage(ctx, receiver, sbMsg, msgCtx.Err())
-	case err := <-nackCalled:
-		s.abandonMessage(ctx, receiver, sbMsg, err)
-	case <-ackCalled:
-		s.completeMessage(ctx, receiver, sbMsg)
 	}
 }
 

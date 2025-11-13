@@ -177,13 +177,13 @@ func ExamplePublisher_withPipeline() {
 				Time:    time.Now(),
 			}
 
-			// Create output message with same metadata
+			// Create output message with same metadata and ack/nack forwarding
 			outMsg := gopipe.NewMessage(
 				msg.Metadata,
 				processed,
-				time.Time{},
-				msg.Ack,
-				msg.Nack,
+				msg.Deadline(),
+				func() { msg.Ack() },
+				func(err error) { msg.Nack(err) },
 			)
 
 			outputMessages <- outMsg

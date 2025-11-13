@@ -224,19 +224,42 @@ When publishing, these metadata keys are automatically mapped back to Service Bu
 
 ## Message Acknowledgment
 
+### Non-Blocking Design
+The subscriber uses a **non-blocking acknowledgment model**. When you receive a message from the channel, the subscriber does not wait for you to call `Ack()` or `Nack()`. Instead:
+
+1. The message is sent to your channel immediately with a deadline
+2. When you call `Ack()` or `Nack()`, the Service Bus operation executes directly
+3. The gopipe.Message implementation ensures ack/nack is only called once
+
+This design allows for parallel downstream processing without blocking the subscriber. No waiting goroutines are created - the ack/nack functions directly wrap the Service Bus operations.
+
 ### Ack (Success)
-Call `msg.Ack()` to mark a message as successfully processed. This calls `CompleteMessage` on the Service Bus receiver, removing the message from the queue.
+Call `msg.Ack()` to mark a message as successfully processed. This directly calls `CompleteMessage` on the Service Bus receiver, removing the message from the queue.
 
 ```go
 msg.Ack()
 ```
 
 ### Nack (Failure)
-Call `msg.Nack(err)` to reject a message. This calls `AbandonMessage` on the Service Bus receiver, allowing the message to be redelivered (subject to the queue's max delivery count).
+Call `msg.Nack(err)` to reject a message. This directly calls `AbandonMessage` on the Service Bus receiver, allowing the message to be redelivered (subject to the queue's max delivery count).
 
 ```go
 if err := processMessage(msg); err != nil {
     msg.Nack(err)
+    continue
+}
+```
+
+### Message Deadline
+Each message has a deadline set to `time.Now() + MessageTimeout`. The deadline is advisory - it's up to your processing code or the gopipe pipeline to respect it. The subscriber itself doesn't enforce the deadline with background goroutines.
+
+```go
+config := azservicebus.DefaultSubscriberConfig()
+config.MessageTimeout = 120 * time.Second // Set deadline duration
+
+// In your processing code, check the deadline:
+if time.Now().After(msg.Deadline()) {
+    msg.Nack(fmt.Errorf("processing deadline exceeded"))
     continue
 }
 ```
