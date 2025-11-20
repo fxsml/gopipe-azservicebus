@@ -5,27 +5,81 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/fxsml/gopipe"
 )
 
+type sender struct {
+	add   func(msgs <-chan *gopipe.Message[any]) error
+	close func() error
+}
+
 // Publisher implements the gopipe Publisher interface for Azure Service Bus
-type Publisher[T any] struct {
-	client     *azservicebus.Client
-	config     PublisherConfig
-	senders    map[string]*azservicebus.Sender
-	senderLock sync.RWMutex
-	closed     bool
-	closedLock sync.RWMutex
+type Publisher struct {
+	client *azservicebus.Client
+	config PublisherConfig
+
+	senderMu sync.RWMutex
+	senders  map[string]*sender
+
+	closedMu sync.RWMutex
+	closed   bool
 }
 
 // NewPublisher creates a new Azure Service Bus publisher
-func NewPublisher[T any](client *azservicebus.Client, config PublisherConfig) *Publisher[T] {
-	return &Publisher[T]{
+func NewPublisher(client *azservicebus.Client, config PublisherConfig) *Publisher {
+	config.setDefaults()
+	return &Publisher{
 		client:  client,
 		config:  config,
-		senders: make(map[string]*azservicebus.Sender),
+		senders: make(map[string]*sender),
+	}
+}
+
+// PublisherConfig holds configuration for Azure Service Bus publisher
+type PublisherConfig struct {
+	// PublishTimeout is the timeout for publish operations
+	// Default: 30 seconds
+	PublishTimeout time.Duration
+
+	// CloseTimeout is the timeout for closing senders during shutdown
+	// Default: 30 seconds
+	CloseTimeout time.Duration
+
+	// ShutdownTimeout is the maximum time to wait for graceful shutdown
+	// Default: 60 seconds
+	ShutdownTimeout time.Duration
+
+	// BatchMaxSize is the number of messages to send in a single batch
+	// Default: 1
+	BatchMaxSize int
+
+	// BatchMaxDuration is the maximum duration to wait before sending a batch
+	// Default: 0 (no delay)
+	BatchMaxDuration time.Duration
+
+	// MarshalFunc is a function to marshal the message payload
+	// Default: json.Marshal
+	MarshalFunc func(any) ([]byte, error)
+}
+
+func (c *PublisherConfig) setDefaults() {
+	if c.PublishTimeout <= 0 {
+		c.PublishTimeout = 30 * time.Second
+	}
+	if c.CloseTimeout <= 0 {
+		c.CloseTimeout = 30 * time.Second
+	}
+	if c.ShutdownTimeout <= 0 {
+		c.ShutdownTimeout = 60 * time.Second
+	}
+	if c.BatchMaxSize <= 0 {
+		c.BatchMaxSize = 1
+	}
+	if c.MarshalFunc == nil {
+		c.MarshalFunc = json.Marshal
 	}
 }
 
@@ -36,102 +90,83 @@ func NewPublisher[T any](client *azservicebus.Client, config PublisherConfig) *P
 // The topic parameter can be either a queue name or a topic name.
 // Messages are automatically marshaled to JSON before sending.
 // Metadata from gopipe.Message is mapped to Azure Service Bus message properties.
-func (s *Publisher[T]) Publish(ctx context.Context, topic string, msgs <-chan *gopipe.Message[T]) (<-chan struct{}, error) {
-	s.closedLock.RLock()
-	if s.closed {
-		s.closedLock.RUnlock()
-		return nil, fmt.Errorf("publisher is closed")
+func (p *Publisher) Publish(topic string, msgs <-chan *gopipe.Message[any]) error {
+	p.closedMu.RLock()
+	if p.closed {
+		p.closedMu.RUnlock()
+		return fmt.Errorf("publisher is closed")
 	}
-	s.closedLock.RUnlock()
+	defer p.closedMu.RUnlock()
 
-	// Get or create sender for this topic/queue
-	sender, err := s.getOrCreateSender(topic)
+	sender, err := p.getOrCreateSender(topic)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create sender: %w", err)
+		return err
 	}
 
-	// Create done channel
-	done := make(chan struct{})
-
-	// Start publishing loop
-	go func() {
-		defer close(done)
-		s.publishLoop(ctx, sender, msgs)
-	}()
-
-	return done, nil
+	return sender.add(msgs)
 }
 
 // getOrCreateSender gets an existing sender or creates a new one
-func (s *Publisher[T]) getOrCreateSender(queueOrTopic string) (*azservicebus.Sender, error) {
+func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 	// Fast path: check if sender already exists
-	s.senderLock.RLock()
-	sender, exists := s.senders[queueOrTopic]
-	s.senderLock.RUnlock()
+	p.senderMu.RLock()
+	s, exists := p.senders[queueOrTopic]
+	p.senderMu.RUnlock()
 	if exists {
-		return sender, nil
+		return s, nil
 	}
 
 	// Slow path: create new sender
-	s.senderLock.Lock()
-	defer s.senderLock.Unlock()
+	p.senderMu.Lock()
+	defer p.senderMu.Unlock()
 
 	// Double-check after acquiring write lock
-	sender, exists = s.senders[queueOrTopic]
+	s, exists = p.senders[queueOrTopic]
 	if exists {
-		return sender, nil
+		return s, nil
 	}
 
-	var err error
-	sender, err = s.client.NewSender(queueOrTopic, nil)
+	sbSender, err := p.client.NewSender(queueOrTopic, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sender for %s: %w", queueOrTopic, err)
 	}
 
-	s.senders[queueOrTopic] = sender
-	return sender, nil
-}
+	// Create FanIn to merge messages
+	ctx, cancel := context.WithCancel(context.Background())
+	fan := gopipe.NewFanIn[*gopipe.Message[any]](gopipe.FanInConfig{
+		ShutdownTimeout: p.config.ShutdownTimeout,
+	})
 
-// publishLoop continuously publishes messages from the input channel
-func (s *Publisher[T]) publishLoop(ctx context.Context, sender *azservicebus.Sender, msgs <-chan *gopipe.Message[T]) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg, ok := <-msgs:
-			if !ok {
-				// Channel closed, stop publishing
-				return
-			}
+	// Transform messages to Azure Service Bus format
+	in := gopipe.NewTransformPipe(p.transformMessage).Start(context.Background(), fan.Start(ctx))
 
-			// Check if publisher is closed
-			s.closedLock.RLock()
-			if s.closed {
-				s.closedLock.RUnlock()
-				// Nack the message since we can't publish it
-				msg.Nack(fmt.Errorf("publisher is closed"))
-				return
-			}
-			s.closedLock.RUnlock()
+	// Batch messages before sending
+	done := gopipe.NewBatchPipe(
+		p.publishMessageBatch(sbSender),
+		p.config.BatchMaxSize,
+		p.config.BatchMaxDuration,
+	).Start(context.Background(), in)
 
-			// Publish the message
-			if err := s.publishMessage(ctx, sender, msg); err != nil {
-				// Nack on error
-				msg.Nack(err)
-			} else {
-				// Ack on success
-				msg.Ack()
-			}
-		}
+	s = &sender{
+		add: fan.Add,
+		close: func() error {
+			cancel()
+			<-done
+			ctx, cancel := context.WithTimeout(context.Background(), p.config.CloseTimeout)
+			defer cancel()
+			return sbSender.Close(ctx)
+		},
 	}
+
+	p.senders[queueOrTopic] = s
+	return s, nil
 }
 
-// publishMessage publishes a single message to Azure Service Bus
-func (s *Publisher[T]) publishMessage(ctx context.Context, sender *azservicebus.Sender, msg *gopipe.Message[T]) error {
-	// Marshal payload to JSON
-	body, err := json.Marshal(msg.Payload)
+func (p *Publisher) transformMessage(_ context.Context, msg *gopipe.Message[any]) (*azservicebus.Message, error) {
+	// Marshal payload
+	body, err := p.config.MarshalFunc(msg.Payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal message payload: %w", err)
+		return nil, fmt.Errorf("failed to marshal message payload: %w", err)
 	}
 
 	// Create Azure Service Bus message
@@ -141,7 +176,7 @@ func (s *Publisher[T]) publishMessage(ctx context.Context, sender *azservicebus.
 	}
 
 	// Map metadata to Service Bus properties
-	for key, value := range msg.Metadata {
+	msg.Properties().Range(func(key string, value any) bool {
 		// Convert value to string if it's not already
 		strValue, ok := value.(string)
 		if !ok {
@@ -167,43 +202,74 @@ func (s *Publisher[T]) publishMessage(ctx context.Context, sender *azservicebus.
 			// All other metadata goes to application properties
 			sbMsg.ApplicationProperties[key] = value
 		}
+		return true
+	})
+	return nil, nil
+}
+
+func (p *Publisher) publishMessageBatch(sender *azservicebus.Sender) func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {
+	return func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {
+		// Check if publisher is closed
+		p.closedMu.RLock()
+		defer p.closedMu.RUnlock()
+		if p.closed {
+			return nil, fmt.Errorf("publisher is closed")
+		}
+
+		batch, err := sender.NewMessageBatch(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create message batch: %w", err)
+		}
+
+		for _, msg := range i {
+			if err := batch.AddMessage(msg, nil); err != nil {
+				return nil, fmt.Errorf("failed to add message to batch: %w", err)
+			}
+		}
+
+		// Send message with timeout
+		publishCtx, cancel := context.WithTimeout(ctx, p.config.PublishTimeout)
+		defer cancel()
+		if err := sender.SendMessageBatch(publishCtx, batch, nil); err != nil {
+			return nil, fmt.Errorf("failed to send message batch: %w", err)
+		}
+
+		return nil, nil
 	}
-
-	// Send message with timeout
-	publishCtx, cancel := context.WithTimeout(ctx, s.config.PublishTimeout)
-	defer cancel()
-
-	if err := sender.SendMessage(publishCtx, sbMsg, nil); err != nil {
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	return nil
 }
 
 // Close gracefully shuts down the publisher
-func (s *Publisher[T]) Close() error {
-	s.closedLock.Lock()
-	if s.closed {
-		s.closedLock.Unlock()
+func (p *Publisher) Close() error {
+	p.closedMu.Lock()
+	if p.closed {
+		p.closedMu.Unlock()
 		return nil
 	}
-	s.closed = true
-	s.closedLock.Unlock()
+	p.closed = true
+	p.closedMu.Unlock()
 
 	// Close all senders
-	s.senderLock.Lock()
-	defer s.senderLock.Unlock()
+	p.senderMu.Lock()
+	defer p.senderMu.Unlock()
 
+	var wg sync.WaitGroup
+	wg.Add(len(p.senders))
+
+	mu := sync.Mutex{}
 	var errs []error
-	ctx, cancel := context.WithTimeout(context.Background(), s.config.CloseTimeout)
-	defer cancel()
 
-	for topic, sender := range s.senders {
-		if err := sender.Close(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close sender for %s: %w", topic, err))
-		}
+	for topic, s := range p.senders {
+		go func(topic string, s *sender) {
+			defer wg.Done()
+			if err := s.close(); err != nil {
+				mu.Lock()
+				defer mu.Unlock()
+				errs = append(errs, fmt.Errorf("failed to close sender for %s: %w", topic, err))
+			}
+		}(topic, s)
 	}
 
+	wg.Wait()
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing senders: %v", errs)
 	}
