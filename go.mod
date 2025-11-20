@@ -25,4 +25,4 @@ require (
 	golang.org/x/text v0.14.0 // indirect
 )
 
-replace github.com/fxsml/gopipe => /home/sml/git/github.com/fxsml/gopipe
+replace github.com/fxsml/gopipe => ../gopipe
