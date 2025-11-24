@@ -12,7 +12,7 @@ import (
 )
 
 type sender struct {
-	add   func(msgs <-chan *gopipe.Message[any]) error
+	add   func(msgs <-chan *gopipe.Message[any]) (<-chan struct{}, error)
 	close func() error
 }
 
@@ -94,17 +94,17 @@ func (c *PublisherConfig) setDefaults() {
 // The topic parameter can be either a queue name or a topic name.
 // Messages are automatically marshaled to JSON before sending.
 // Metadata from gopipe.Message is mapped to Azure Service Bus message properties.
-func (p *Publisher) Publish(topic string, msgs <-chan *gopipe.Message[any]) error {
+func (p *Publisher) Publish(topic string, msgs <-chan *gopipe.Message[any]) (<-chan struct{}, error) {
 	p.closedMu.RLock()
 	if p.closed {
 		p.closedMu.RUnlock()
-		return fmt.Errorf("publisher is closed")
+		return nil, fmt.Errorf("publisher is closed")
 	}
 	defer p.closedMu.RUnlock()
 
 	sender, err := p.getOrCreateSender(topic)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	return sender.add(msgs)
@@ -135,7 +135,7 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 		return nil, fmt.Errorf("failed to create sender for %s: %w", queueOrTopic, err)
 	}
 
-	// Create FanIn to merge messages
+	// Create FanIn to merge messages from multiple Publish calls
 	ctx, cancel := context.WithCancel(context.Background())
 	fan := gopipe.NewFanIn[*gopipe.Message[any]](gopipe.FanInConfig{
 		ShutdownTimeout: p.config.ShutdownTimeout,
@@ -152,7 +152,26 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 	).Start(context.Background(), in)
 
 	s = &sender{
-		add: fan.Add,
+		add: func(msgs <-chan *gopipe.Message[any]) (<-chan struct{}, error) {
+			// Create a buffered channel for messages to pass to FanIn
+			msgChan := make(chan *gopipe.Message[any])
+
+			// Add the channel to FanIn and get the done channel
+			fanDone, err := fan.Add(msgChan)
+			if err != nil {
+				return fanDone, err
+			}
+
+			// Forward messages from input to FanIn
+			go func() {
+				defer close(msgChan)
+				for msg := range msgs {
+					msgChan <- msg
+				}
+			}()
+
+			return fanDone, nil
+		},
 		close: func() error {
 			cancel()
 			<-done

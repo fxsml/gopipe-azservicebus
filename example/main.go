@@ -26,5 +26,11 @@ func main() {
 		},
 	}
 
-	err = publisher.Publish("your-topic-name", channel.FromValues(msg))
+	done, err := publisher.Publish("your-topic-name", channel.FromValues(msg))
+	if err != nil {
+		panic(err)
+	}
+
+	// Wait for publishing to complete
+	<-done
 }

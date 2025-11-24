@@ -8,9 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fxsml/gopipe"
-	azservicebus_lib "github.com/fxsml/gopipe-azservicebus"
-	"github.com/fxsml/gopipe/channel"
+	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 )
 
 const (
@@ -45,7 +43,7 @@ func TestEmulatorConnection(t *testing.T) {
 	}
 
 	connStr := getEmulatorConnectionString()
-	client, err := azservicebus_lib.NewClient(connStr)
+	client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -63,18 +61,19 @@ func TestPublishToQueue(t *testing.T) {
 	ctx := context.Background()
 	connStr := getEmulatorConnectionString()
 
-	// Create client
-	client, err := azservicebus_lib.NewClient(connStr)
+	// Create client using Azure SDK directly
+	client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close(ctx)
 
-	// Create publisher
-	publisher := azservicebus_lib.NewPublisher(client, azservicebus_lib.PublisherConfig{
-		PublishTimeout: 10 * time.Second,
-	})
-	defer publisher.Close()
+	// Create sender using Azure SDK directly
+	sender, err := client.NewSender(testQueue, nil)
+	if err != nil {
+		t.Fatalf("Failed to create sender: %v", err)
+	}
+	defer sender.Close(ctx)
 
 	// Create test message
 	testMsg := TestMessage{
@@ -83,17 +82,26 @@ func TestPublishToQueue(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 
-	// Create gopipe message
-	msg := &gopipe.Message[any]{
-		Payload: testMsg,
-	}
-	msg.Properties().Set("test-property", "test-value")
-	msg.Properties().Set("message_id", fmt.Sprintf("test-msg-%d", testMsg.ID))
-
-	// Publish message
-	err = publisher.Publish(testQueue, channel.FromValues(msg))
+	// Marshal message to JSON
+	body, err := json.Marshal(testMsg)
 	if err != nil {
-		t.Fatalf("Failed to publish message: %v", err)
+		t.Fatalf("Failed to marshal message: %v", err)
+	}
+
+	// Create Azure Service Bus message
+	messageID := fmt.Sprintf("test-msg-%d", testMsg.ID)
+	asbMessage := &azservicebus.Message{
+		Body:      body,
+		MessageID: &messageID,
+		ApplicationProperties: map[string]any{
+			"test-property": "test-value",
+		},
+	}
+
+	// Send message using Azure SDK
+	err = sender.SendMessage(ctx, asbMessage, nil)
+	if err != nil {
+		t.Fatalf("Failed to send message: %v", err)
 	}
 
 	t.Logf("Successfully published message to queue %s", testQueue)
@@ -108,18 +116,19 @@ func TestPublishAndReceive(t *testing.T) {
 	ctx := context.Background()
 	connStr := getEmulatorConnectionString()
 
-	// Create client
-	client, err := azservicebus_lib.NewClient(connStr)
+	// Create client using Azure SDK directly
+	client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close(ctx)
 
-	// Create publisher
-	publisher := azservicebus_lib.NewPublisher(client, azservicebus_lib.PublisherConfig{
-		PublishTimeout: 10 * time.Second,
-	})
-	defer publisher.Close()
+	// Create sender using Azure SDK directly
+	sender, err := client.NewSender(testQueue, nil)
+	if err != nil {
+		t.Fatalf("Failed to create sender: %v", err)
+	}
+	defer sender.Close(ctx)
 
 	// Create test messages
 	messageCount := 3
@@ -130,22 +139,33 @@ func TestPublishAndReceive(t *testing.T) {
 			Timestamp: time.Now(),
 		}
 
-		msg := &gopipe.Message[any]{
-			Payload: testMsg,
-		}
-		msg.Properties().Set("message_id", fmt.Sprintf("test-msg-%d", i))
-		msg.Properties().Set("test-run", t.Name())
-
-		// Publish message
-		err = publisher.Publish(testQueue, channel.FromValues(msg))
+		// Marshal message to JSON
+		body, err := json.Marshal(testMsg)
 		if err != nil {
-			t.Fatalf("Failed to publish message %d: %v", i, err)
+			t.Fatalf("Failed to marshal message %d: %v", i, err)
 		}
+
+		// Create Azure Service Bus message
+		messageID := fmt.Sprintf("test-msg-%d", i)
+		asbMessage := &azservicebus.Message{
+			Body:      body,
+			MessageID: &messageID,
+			ApplicationProperties: map[string]any{
+				"test-run": t.Name(),
+			},
+		}
+
+		// Send message using Azure SDK
+		err = sender.SendMessage(ctx, asbMessage, nil)
+		if err != nil {
+			t.Fatalf("Failed to send message %d: %v", i, err)
+		}
+		t.Logf("Message %d published", i)
 	}
 
 	t.Logf("Published %d messages to queue %s", messageCount, testQueue)
 
-	// Create receiver to verify messages were sent
+	// Create receiver using Azure SDK directly
 	receiver, err := client.NewReceiverForQueue(testQueue, nil)
 	if err != nil {
 		t.Fatalf("Failed to create receiver: %v", err)
@@ -205,7 +225,8 @@ func TestEmulatorHealthCheck(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := azservicebus_lib.NewClient(connStr)
+	// Create client using Azure SDK directly
+	client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
 	if err != nil {
 		t.Fatalf("Emulator health check failed - could not create client: %v\n"+
 			"Make sure the emulator is running with: docker compose up -d", err)
