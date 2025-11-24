@@ -46,6 +46,9 @@ golangci-lint run
 go vet ./...
 ```
 
+- use `any` instead of `interface{}`
+- prefer for range when ever possible over fori
+
 ## Architecture
 
 This library follows the adapter pattern to integrate Azure Service Bus with gopipe pipelines:

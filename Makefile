@@ -29,13 +29,16 @@ emulator-status: ## Check emulator status
 	@echo "Service Bus emulator should be available at: http://localhost:5678"
 	@echo "SQL Server should be available at: localhost:1433"
 
-test: ## Run all tests
+test: ## Run all tests (requires real Azure Service Bus)
+	@echo "Running all tests with real Azure Service Bus..."
+	@echo "Note: Tests require AZURE_SERVICEBUS_CONNECTION_STRING in .env file"
+	@echo "Get connection string from: https://portal.azure.com -> Service Bus namespace -> Shared access policies"
 	go test -v ./...
 
-test-integration: ## Run integration tests (requires emulator)
+test-integration: ## Run integration tests only (requires Azure Service Bus)
 	@echo "Running integration tests..."
-	@echo "Note: Make sure the emulator is running with 'make emulator-start'"
-	go test -v -run "TestEmulator" ./...
+	@echo "Note: Tests require AZURE_SERVICEBUS_CONNECTION_STRING in .env file"
+	go test -v -run "TestConnection|TestPublish|TestTopic|TestMessage" ./...
 
 test-unit: ## Run unit tests only
 	go test -v -short ./...
