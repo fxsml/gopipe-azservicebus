@@ -1,4 +1,4 @@
-.PHONY: help emulator-start emulator-stop emulator-restart emulator-logs emulator-status test test-integration test-unit clean claude-yolo claude-attach claude-stop
+.PHONY: help emulator-start emulator-stop emulator-restart emulator-logs emulator-status test test-integration test-unit clean claude-build claude-start claude-stop claude-remove claude-restart claude-attach claude-shell claude-status claude-logs
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -68,24 +68,78 @@ clean: ## Clean up
 	docker compose down -v
 	@echo "Cleaned up test artifacts and stopped emulator"
 
-claude-yolo: ## Spin up Claude Code container and clone this repo on main
+claude-build: ## Build Claude Code Docker image
+	@echo "Building Claude Code Docker image..."
+	docker build -f Dockerfile.claude -t gopipe-azservicebus-claude:latest .
+	@echo "Image built successfully."
+
+claude-start: claude-build ## Start Claude Code container (idempotent)
 	@echo "Starting Claude Code container..."
-	docker run -d --name gopipe-azservicebus-claude \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-e ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) \
-		ghcr.io/anthropics/claude-code:latest \
-		bash -c "git clone -b main https://github.com/fxsml/gopipe-azservicebus.git /workspace && cd /workspace && exec bash"
-	@echo "Container started. Use 'make claude-attach' to connect."
+	@if [ "$$(docker ps -aq -f name=gopipe-azservicebus-claude)" ]; then \
+		echo "Container exists. Checking status..."; \
+		if [ "$$(docker ps -q -f name=gopipe-azservicebus-claude)" ]; then \
+			echo "Container is already running."; \
+		else \
+			echo "Starting existing container..."; \
+			docker start gopipe-azservicebus-claude; \
+		fi; \
+	else \
+		echo "Creating new container..."; \
+		docker run -d --name gopipe-azservicebus-claude \
+			-v /var/run/docker.sock:/var/run/docker.sock \
+			-e ANTHROPIC_API_KEY=$${ANTHROPIC_API_KEY:-} \
+			gopipe-azservicebus-claude:latest; \
+		echo "Cloning repository..."; \
+		docker exec gopipe-azservicebus-claude bash -c "git clone https://github.com/fxsml/gopipe-azservicebus.git /workspace/repo 2>/dev/null || echo 'Repo already exists'"; \
+	fi
+	@echo ""
+	@echo "Container is running. Use 'make claude-attach' to connect."
+	@echo "To set API key: docker exec gopipe-azservicebus-claude bash -c 'export ANTHROPIC_API_KEY=your_key && claude login'"
 
-claude-attach: ## Attach to Claude Code in the container
-	@echo "Attaching to Claude Code..."
-	docker exec -it gopipe-azservicebus-claude bash -c "cd /workspace && claude"
-
-claude-stop: ## Stop and remove Claude Code container
+claude-stop: ## Stop Claude Code container (keeps container for restart)
 	@echo "Stopping Claude Code container..."
-	docker stop gopipe-azservicebus-claude || true
-	docker rm gopipe-azservicebus-claude || true
-	@echo "Container stopped and removed."
+	@docker stop gopipe-azservicebus-claude 2>/dev/null || echo "Container not running"
+	@echo "Container stopped (use 'make claude-start' to restart or 'make claude-remove' to delete)"
+
+claude-remove: ## Remove Claude Code container completely
+	@echo "Removing Claude Code container..."
+	@docker stop gopipe-azservicebus-claude 2>/dev/null || true
+	@docker rm gopipe-azservicebus-claude 2>/dev/null || true
+	@echo "Container removed."
+
+claude-restart: claude-stop claude-start ## Restart Claude Code container
+
+claude-attach: ## Attach to interactive shell in workspace
+	@echo "Attaching to Claude Code container..."
+	@if [ ! "$$(docker ps -q -f name=gopipe-azservicebus-claude)" ]; then \
+		echo "Container is not running. Starting..."; \
+		$(MAKE) claude-start; \
+	fi
+	@docker exec -it gopipe-azservicebus-claude bash -c "cd /workspace/repo && exec bash"
+
+claude-shell: ## Open interactive shell in container root
+	@echo "Opening shell in Claude Code container..."
+	@if [ ! "$$(docker ps -q -f name=gopipe-azservicebus-claude)" ]; then \
+		echo "Container is not running. Starting..."; \
+		$(MAKE) claude-start; \
+	fi
+	@docker exec -it gopipe-azservicebus-claude /bin/bash
+
+claude-status: ## Show Claude Code container status
+	@echo "Claude Code Container Status:"
+	@echo "----------------------------"
+	@if [ "$$(docker ps -q -f name=gopipe-azservicebus-claude)" ]; then \
+		echo "Status: RUNNING"; \
+		docker ps -f name=gopipe-azservicebus-claude --format "ID: {{.ID}}\nUptime: {{.Status}}\nImage: {{.Image}}"; \
+	elif [ "$$(docker ps -aq -f name=gopipe-azservicebus-claude)" ]; then \
+		echo "Status: STOPPED"; \
+		docker ps -a -f name=gopipe-azservicebus-claude --format "ID: {{.ID}}\nStatus: {{.Status}}\nImage: {{.Image}}"; \
+	else \
+		echo "Status: NOT CREATED"; \
+	fi
+
+claude-logs: ## Show Claude Code container logs
+	@docker logs gopipe-azservicebus-claude 2>&1 || echo "Container not found"
 
 verify: fmt vet ## Run formatting and vetting
 
