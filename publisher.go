@@ -10,6 +10,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/fxsml/gopipe"
+	"github.com/fxsml/gopipe/channel"
 	"github.com/fxsml/gopipe/message"
 )
 
@@ -66,6 +67,9 @@ type PublisherConfig struct {
 	// MarshalFunc is a function to marshal the message payload
 	// Default: json.Marshal
 	MarshalFunc func(any) ([]byte, error)
+
+	// ErrorHandler is an optional function to handle message publish errors
+	ErrorHandler func(*message.Message, error)
 }
 
 func (c *PublisherConfig) setDefaults() {
@@ -87,6 +91,9 @@ func (c *PublisherConfig) setDefaults() {
 	}
 	if c.MarshalFunc == nil {
 		c.MarshalFunc = json.Marshal
+	}
+	if c.ErrorHandler == nil {
+		c.ErrorHandler = func(*message.Message, error) {}
 	}
 }
 
@@ -111,6 +118,11 @@ func (p *Publisher) Publish(topic string, msgs <-chan *message.Message) (<-chan 
 	}
 
 	return sender.add(msgs)
+}
+
+type batchResult struct {
+	msg *message.Message
+	err error
 }
 
 // getOrCreateSender gets an existing sender or creates a new one
@@ -143,16 +155,23 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 	fan := gopipe.NewFanIn[*message.Message](gopipe.FanInConfig{
 		ShutdownTimeout: p.config.ShutdownTimeout,
 	})
-
-	// Transform messages to Azure Service Bus format
-	in := gopipe.NewTransformPipe(p.transformMessage).Start(context.Background(), fan.Start(ctx))
+	in := fan.Start(ctx)
 
 	// Batch messages before sending
-	done := gopipe.NewBatchPipe(
+	batchRes := gopipe.NewBatchPipe(
 		p.publishMessageBatch(queueOrTopic),
 		p.config.BatchMaxSize,
 		p.config.BatchMaxDuration,
+		gopipe.WithCancel[[]*message.Message, batchResult](func(msg []*message.Message, err error) {
+			for _, m := range msg {
+				p.config.ErrorHandler(m, err)
+			}
+		}),
 	).Start(context.Background(), in)
+
+	done := channel.Sink(batchRes, func(res batchResult) {
+		p.config.ErrorHandler(res.msg, res.err)
+	})
 
 	s = &sender{
 		sbSender: sbSender,
@@ -170,7 +189,7 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 	return s, nil
 }
 
-func (p *Publisher) transformMessage(_ context.Context, msg *message.Message) (*azservicebus.Message, error) {
+func (p *Publisher) transformMessage(msg *message.Message) (*azservicebus.Message, error) {
 	// Marshal payload
 	body, err := p.config.MarshalFunc(msg.Payload)
 	if err != nil {
@@ -222,8 +241,9 @@ func (p *Publisher) transformMessage(_ context.Context, msg *message.Message) (*
 	return sbMsg, nil
 }
 
-func (p *Publisher) publishMessageBatch(queueOrTopic string) func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {
-	return func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {
+func (p *Publisher) publishMessageBatch(queueOrTopic string) func(ctx context.Context, i []*message.Message) ([]batchResult, error) {
+	return func(ctx context.Context, i []*message.Message) ([]batchResult, error) {
+		// Send batch with retry logic
 		// Check if publisher is closed
 		p.closedMu.RLock()
 		if p.closed {
@@ -242,8 +262,22 @@ func (p *Publisher) publishMessageBatch(queueOrTopic string) func(ctx context.Co
 
 		sender := s.sbSender
 
+		// Prepare result slice
+		results := make([]batchResult, 0, len(i))
+
+		// Convert to azservicebus.Messages
+		sbMessages := make([]*azservicebus.Message, len(i))
+		for idx, msg := range i {
+			sbMsg, err := p.transformMessage(msg)
+			if err != nil {
+				results = append(results, batchResult{msg: msg, err: fmt.Errorf("failed to transform message: %w", err)})
+				continue
+			}
+			sbMessages[idx] = sbMsg
+		}
+
 		// Attempt to send message batch
-		err := p.attemptSendBatch(ctx, sender, i)
+		err := p.attemptSendBatch(ctx, sender, sbMessages)
 		if err != nil {
 			// Check if it's a connection lost or closed error (includes idle timeout)
 			var sbErr *azservicebus.Error
@@ -255,15 +289,15 @@ func (p *Publisher) publishMessageBatch(queueOrTopic string) func(ctx context.Co
 				}
 
 				// Retry sending with new sender
-				if err := p.attemptSendBatch(ctx, newSender, i); err != nil {
+				if err := p.attemptSendBatch(ctx, newSender, sbMessages); err != nil {
 					return nil, fmt.Errorf("failed to send message batch after recreating sender: %w", err)
 				}
-				return nil, nil
+				return results, nil
 			}
 			return nil, err
 		}
 
-		return nil, nil
+		return results, nil
 	}
 }
 
