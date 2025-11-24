@@ -29,9 +29,9 @@ func getConnectionString(t *testing.T) string {
 
 // TestHelper provides utilities for managing Azure Service Bus resources in tests
 type TestHelper struct {
-	t          *testing.T
+	t           *testing.T
 	adminClient *admin.Client
-	connStr    string
+	connStr     string
 
 	// Resources to cleanup
 	queues []string

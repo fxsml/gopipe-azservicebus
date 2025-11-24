@@ -176,7 +176,7 @@ func (p *Publisher) transformMessage(_ context.Context, msg *gopipe.Message[any]
 	// Create Azure Service Bus message
 	sbMsg := &azservicebus.Message{
 		Body:                  body,
-		ApplicationProperties: make(map[string]interface{}),
+		ApplicationProperties: make(map[string]any),
 	}
 
 	// Map metadata to Service Bus properties

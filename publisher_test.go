@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	azservicebuspkg "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe"
+	azservicebuspkg "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe/channel"
 )
 
@@ -45,7 +45,7 @@ func TestPublisher_EndToEnd(t *testing.T) {
 	messages := make([]*gopipe.Message[any], 0, messageCount)
 	for i := 1; i <= messageCount; i++ {
 		msg := &gopipe.Message[any]{
-			Payload: map[string]interface{}{
+			Payload: map[string]any{
 				"id":      i,
 				"content": fmt.Sprintf("Test message #%d", i),
 			},
@@ -90,7 +90,7 @@ func TestPublisher_EndToEnd(t *testing.T) {
 			receivedCount++
 
 			// Verify message content
-			var payload map[string]interface{}
+			var payload map[string]any
 			if err := json.Unmarshal(msg.Body, &payload); err != nil {
 				t.Errorf("Failed to unmarshal message: %v", err)
 				continue
@@ -145,7 +145,7 @@ func TestPublisher_WithTopic(t *testing.T) {
 
 	// Publish test message to topic
 	msg := &gopipe.Message[any]{
-		Payload: map[string]interface{}{
+		Payload: map[string]any{
 			"message": "Hello from topic test!",
 		},
 	}
@@ -185,7 +185,7 @@ func TestPublisher_WithTopic(t *testing.T) {
 	}
 
 	// Verify message content
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(msgs[0].Body, &payload); err != nil {
 		t.Fatalf("Failed to unmarshal message: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestPublisher_BatchMessages(t *testing.T) {
 	messages := make([]*gopipe.Message[any], 0, messageCount)
 	for i := 1; i <= messageCount; i++ {
 		msg := &gopipe.Message[any]{
-			Payload: map[string]interface{}{
+			Payload: map[string]any{
 				"id": i,
 			},
 		}
@@ -467,7 +467,7 @@ func TestPublisher_ConcurrentPublish(t *testing.T) {
 	// Create multiple test queues
 	queueCount := 3
 	queues := make([]string, queueCount)
-	for i := 0; i < queueCount; i++ {
+	for i := range queues {
 		queueName := GenerateTestName(t, fmt.Sprintf("test-concurrent-%d", i))
 		helper.CreateQueue(ctx, queueName)
 		queues[i] = queueName
@@ -491,7 +491,7 @@ func TestPublisher_ConcurrentPublish(t *testing.T) {
 	doneChans := make([]<-chan struct{}, queueCount)
 	for i, queueName := range queues {
 		msg := &gopipe.Message[any]{
-			Payload: map[string]interface{}{
+			Payload: map[string]any{
 				"queue_index": i,
 				"message":     fmt.Sprintf("Message for queue %d", i),
 			},
