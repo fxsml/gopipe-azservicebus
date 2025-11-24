@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fxsml/gopipe"
 	azservicebuspkg "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe/channel"
+	"github.com/fxsml/gopipe/message"
 )
 
 // TestPublisher_EndToEnd tests the full publisher workflow with real Azure Service Bus
@@ -42,9 +42,9 @@ func TestPublisher_EndToEnd(t *testing.T) {
 
 	// Publish test messages
 	messageCount := 5
-	messages := make([]*gopipe.Message[any], 0, messageCount)
+	messages := make([]*message.Message, 0, messageCount)
 	for i := 1; i <= messageCount; i++ {
-		msg := &gopipe.Message[any]{
+		msg := &message.Message{
 			Payload: map[string]any{
 				"id":      i,
 				"content": fmt.Sprintf("Test message #%d", i),
@@ -144,7 +144,7 @@ func TestPublisher_WithTopic(t *testing.T) {
 	defer publisher.Close()
 
 	// Publish test message to topic
-	msg := &gopipe.Message[any]{
+	msg := &message.Message{
 		Payload: map[string]any{
 			"message": "Hello from topic test!",
 		},
@@ -228,9 +228,9 @@ func TestPublisher_BatchMessages(t *testing.T) {
 
 	// Publish many messages
 	messageCount := 25
-	messages := make([]*gopipe.Message[any], 0, messageCount)
+	messages := make([]*message.Message, 0, messageCount)
 	for i := 1; i <= messageCount; i++ {
-		msg := &gopipe.Message[any]{
+		msg := &message.Message{
 			Payload: map[string]any{
 				"id": i,
 			},
@@ -311,7 +311,7 @@ func TestPublisher_MessageMetadata(t *testing.T) {
 	defer publisher.Close()
 
 	// Create message with metadata
-	msg := &gopipe.Message[any]{
+	msg := &message.Message{
 		Payload: map[string]string{"data": "test"},
 	}
 	messageID := "test-msg-123"
@@ -403,7 +403,7 @@ func TestPublisher_ClosedPublisherReturnsError(t *testing.T) {
 	}
 
 	// Try to publish after closing
-	msg := &gopipe.Message[any]{
+	msg := &message.Message{
 		Payload: map[string]string{"test": "data"},
 	}
 
@@ -490,7 +490,7 @@ func TestPublisher_ConcurrentPublish(t *testing.T) {
 	// Publish to all queues concurrently
 	doneChans := make([]<-chan struct{}, queueCount)
 	for i, queueName := range queues {
-		msg := &gopipe.Message[any]{
+		msg := &message.Message{
 			Payload: map[string]any{
 				"queue_index": i,
 				"message":     fmt.Sprintf("Message for queue %d", i),

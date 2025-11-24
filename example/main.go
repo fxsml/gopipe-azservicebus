@@ -1,9 +1,11 @@
 package main
 
 import (
-	"github.com/fxsml/gopipe"
+	"os"
+
 	azservicebus "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe/channel"
+	"github.com/fxsml/gopipe/message"
 )
 
 type Article struct {
@@ -12,14 +14,16 @@ type Article struct {
 }
 
 func main() {
-	client, err := azservicebus.NewClient("your-connection-string")
+	connectionString := os.Getenv("AZURE_SERVICEBUS_CONNECTION_STRING")
+
+	client, err := azservicebus.NewClient(connectionString)
 	if err != nil {
 		panic(err)
 	}
 	publisher := azservicebus.NewPublisher(client, azservicebus.PublisherConfig{})
 	defer publisher.Close()
 
-	msg := &gopipe.Message[any]{
+	msg := &message.Message{
 		Payload: Article{
 			ID:   1,
 			Name: "Example",

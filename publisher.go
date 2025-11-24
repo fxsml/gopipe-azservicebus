@@ -9,10 +9,11 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/fxsml/gopipe"
+	"github.com/fxsml/gopipe/message"
 )
 
 type sender struct {
-	add   func(msgs <-chan *gopipe.Message[any]) (<-chan struct{}, error)
+	add   func(msgs <-chan *message.Message) (<-chan struct{}, error)
 	close func() error
 }
 
@@ -93,8 +94,8 @@ func (c *PublisherConfig) setDefaults() {
 //
 // The topic parameter can be either a queue name or a topic name.
 // Messages are automatically marshaled to JSON before sending.
-// Metadata from gopipe.Message is mapped to Azure Service Bus message properties.
-func (p *Publisher) Publish(topic string, msgs <-chan *gopipe.Message[any]) (<-chan struct{}, error) {
+// Metadata from message.Message is mapped to Azure Service Bus message properties.
+func (p *Publisher) Publish(topic string, msgs <-chan *message.Message) (<-chan struct{}, error) {
 	p.closedMu.RLock()
 	if p.closed {
 		p.closedMu.RUnlock()
@@ -137,7 +138,7 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 
 	// Create FanIn to merge messages from multiple Publish calls
 	ctx, cancel := context.WithCancel(context.Background())
-	fan := gopipe.NewFanIn[*gopipe.Message[any]](gopipe.FanInConfig{
+	fan := gopipe.NewFanIn[*message.Message](gopipe.FanInConfig{
 		ShutdownTimeout: p.config.ShutdownTimeout,
 	})
 
@@ -166,7 +167,7 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 	return s, nil
 }
 
-func (p *Publisher) transformMessage(_ context.Context, msg *gopipe.Message[any]) (*azservicebus.Message, error) {
+func (p *Publisher) transformMessage(_ context.Context, msg *message.Message) (*azservicebus.Message, error) {
 	// Marshal payload
 	body, err := p.config.MarshalFunc(msg.Payload)
 	if err != nil {
