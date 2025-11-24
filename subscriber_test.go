@@ -1,4 +1,4 @@
-package azservicebus_test
+package azservicebus
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	azservicebuspkg "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe/channel"
 	"github.com/fxsml/gopipe/message"
 )
@@ -26,14 +25,14 @@ func TestSubscriber_EndToEnd(t *testing.T) {
 	helper.CreateQueue(ctx, queueName)
 
 	// Create client
-	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	client, err := NewClient(helper.ConnectionString())
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close(ctx)
 
 	// First, publish some test messages
-	publisher := azservicebuspkg.NewPublisher(client, azservicebuspkg.PublisherConfig{
+	publisher := NewPublisher(client, PublisherConfig{
 		PublishTimeout:   30 * time.Second,
 		BatchMaxSize:     1,
 		BatchMaxDuration: 1 * time.Millisecond,
@@ -70,7 +69,7 @@ func TestSubscriber_EndToEnd(t *testing.T) {
 	t.Logf("Successfully published %d messages", messageCount)
 
 	// Now subscribe and receive messages
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+	subscriber := NewSubscriber(client, SubscriberConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 5,
 		ErrorHandler: func(err error) {
@@ -132,14 +131,14 @@ func TestSubscriber_MessageMetadata(t *testing.T) {
 	helper.CreateQueue(ctx, queueName)
 
 	// Create client
-	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	client, err := NewClient(helper.ConnectionString())
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close(ctx)
 
 	// Publish a message with metadata
-	publisher := azservicebuspkg.NewPublisher(client, azservicebuspkg.PublisherConfig{
+	publisher := NewPublisher(client, PublisherConfig{
 		PublishTimeout:   30 * time.Second,
 		BatchMaxSize:     1,
 		BatchMaxDuration: 1 * time.Millisecond,
@@ -170,7 +169,7 @@ func TestSubscriber_MessageMetadata(t *testing.T) {
 	<-done
 
 	// Subscribe and verify metadata
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+	subscriber := NewSubscriber(client, SubscriberConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 1,
 		ErrorHandler: func(err error) {
@@ -229,13 +228,13 @@ func TestSubscriber_ClosedSubscriberReturnsError(t *testing.T) {
 
 	ctx := context.Background()
 
-	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	client, err := NewClient(helper.ConnectionString())
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close(ctx)
 
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+	subscriber := NewSubscriber(client, SubscriberConfig{
 		ErrorHandler: func(err error) {
 			t.Errorf("Unexpected error in subscriber: %v", err)
 		},
@@ -272,13 +271,13 @@ func TestSubscriber_CloseIdempotent(t *testing.T) {
 
 	ctx := context.Background()
 
-	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	client, err := NewClient(helper.ConnectionString())
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close(ctx)
 
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+	subscriber := NewSubscriber(client, SubscriberConfig{
 		ErrorHandler: func(err error) {
 			t.Errorf("Unexpected error in subscriber: %v", err)
 		},
@@ -313,14 +312,14 @@ func TestSubscriber_PublishSubscribeRoundtrip(t *testing.T) {
 	helper.CreateQueue(ctx, queueName)
 
 	// Create client
-	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	client, err := NewClient(helper.ConnectionString())
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close(ctx)
 
 	// Start subscriber first
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+	subscriber := NewSubscriber(client, SubscriberConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 10,
 		ErrorHandler: func(err error) {
@@ -338,7 +337,7 @@ func TestSubscriber_PublishSubscribeRoundtrip(t *testing.T) {
 	}
 
 	// Publish messages
-	publisher := azservicebuspkg.NewPublisher(client, azservicebuspkg.PublisherConfig{
+	publisher := NewPublisher(client, PublisherConfig{
 		PublishTimeout:   30 * time.Second,
 		BatchMaxSize:     5,
 		BatchMaxDuration: 10 * time.Millisecond,
@@ -410,13 +409,13 @@ func TestSubscriber_AutoDetectQueueAndTopic(t *testing.T) {
 	t.Logf("Testing queue auto-detection with: %s", queueName)
 
 	// Create client
-	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	client, err := NewClient(helper.ConnectionString())
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
 	// Create subscriber
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+	subscriber := NewSubscriber(client, SubscriberConfig{
 		ErrorHandler: func(err error) {
 			t.Errorf("Unexpected error in subscriber: %v", err)
 		},
@@ -439,7 +438,7 @@ func TestSubscriber_AutoDetectQueueAndTopic(t *testing.T) {
 	}
 	msgChan := channel.FromValues(messages...)
 
-	publisher := azservicebuspkg.NewPublisher(client, azservicebuspkg.PublisherConfig{})
+	publisher := NewPublisher(client, PublisherConfig{})
 	defer publisher.Close()
 
 	publishDone, err := publisher.Publish(queueName, msgChan)
@@ -484,7 +483,7 @@ func TestSubscriber_AutoDetectQueueAndTopic(t *testing.T) {
 	t.Logf("Testing topic auto-detection with: %s", topicPath)
 
 	// Create a new subscriber for the topic
-	topicSubscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+	topicSubscriber := NewSubscriber(client, SubscriberConfig{
 		ErrorHandler: func(err error) {
 			t.Errorf("Unexpected error in topic subscriber: %v", err)
 		},
@@ -542,3 +541,339 @@ func TestSubscriber_AutoDetectQueueAndTopic(t *testing.T) {
 
 	t.Log("Auto-detection test completed successfully")
 }
+
+// TestSubscriber_RecreateReceiver tests the recreateReceiver functionality
+func TestSubscriber_RecreateReceiver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test queue
+	queueName := GenerateTestName(t, "test-recreate-receiver")
+	helper.CreateQueue(ctx, queueName)
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Create subscriber
+	subscriber := NewSubscriber(client, SubscriberConfig{
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
+	defer subscriber.Close()
+
+	// First, subscribe to create the receiver
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	receiveChan, err := subscriber.Subscribe(subCtx, queueName)
+	if err != nil {
+		t.Fatalf("Failed to subscribe: %v", err)
+	}
+
+	t.Log("Initial subscription created successfully")
+
+	// Publish a message
+	publisher := NewPublisher(client, PublisherConfig{})
+	defer publisher.Close()
+
+	msg1 := &message.Message{
+		Payload: map[string]any{"id": 1, "content": "First message"},
+	}
+	msgChan1 := channel.FromValues(msg1)
+	done1, err := publisher.Publish(queueName, msgChan1)
+	if err != nil {
+		t.Fatalf("Failed to publish first message: %v", err)
+	}
+	<-done1
+
+	// Receive the first message
+	select {
+	case msg := <-receiveChan:
+		t.Logf("Received first message: %v", msg.Payload)
+		msg.Ack()
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for first message")
+	}
+
+	// Now call recreateReceiver to simulate connection recovery
+	newReceiver, err := subscriber.recreateReceiver(queueName)
+	if err != nil {
+		t.Fatalf("Failed to recreate receiver: %v", err)
+	}
+
+	if newReceiver == nil {
+		t.Fatal("recreateReceiver returned nil receiver")
+	}
+
+	t.Log("Receiver recreated successfully")
+
+	// Publish another message
+	msg2 := &message.Message{
+		Payload: map[string]any{"id": 2, "content": "Second message after recreation"},
+	}
+	msgChan2 := channel.FromValues(msg2)
+	done2, err := publisher.Publish(queueName, msgChan2)
+	if err != nil {
+		t.Fatalf("Failed to publish second message: %v", err)
+	}
+	<-done2
+
+	// Receive the second message with recreated receiver
+	select {
+	case msg := <-receiveChan:
+		t.Logf("Received second message after recreation: %v", msg.Payload)
+		msg.Ack()
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for second message after recreation")
+	}
+
+	t.Log("Receiver successfully processed message after recreation")
+}
+
+// TestSubscriber_RecreateReceiverWhenClosing tests that recreateReceiver fails gracefully when subscriber is closing
+func TestSubscriber_RecreateReceiverWhenClosing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test queue
+	queueName := GenerateTestName(t, "test-recreate-closing")
+	helper.CreateQueue(ctx, queueName)
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Create subscriber
+	subscriber := NewSubscriber(client, SubscriberConfig{
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
+
+	// Subscribe to create the receiver
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	_, err = subscriber.Subscribe(subCtx, queueName)
+	if err != nil {
+		t.Fatalf("Failed to subscribe: %v", err)
+	}
+
+	// Close the subscriber
+	if err := subscriber.Close(); err != nil {
+		t.Fatalf("Failed to close subscriber: %v", err)
+	}
+
+	// Try to recreate receiver after closing
+	_, err = subscriber.recreateReceiver(queueName)
+	if err == nil {
+		t.Error("Expected error when recreating receiver after close, got nil")
+	}
+
+	if err != nil && !contains(err.Error(), "closing") {
+		t.Errorf("Expected error message to contain 'closing', got: %v", err)
+	}
+
+	t.Log("recreateReceiver correctly failed when subscriber is closed")
+}
+
+// TestSubscriber_RecreateReceiverForTopic tests recreating a receiver for a topic subscription
+func TestSubscriber_RecreateReceiverForTopic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test topic and subscription
+	topicName := GenerateTestName(t, "test-recreate-topic")
+	subscriptionName := "test-sub"
+	helper.CreateTopic(ctx, topicName)
+	helper.CreateSubscription(ctx, topicName, subscriptionName)
+
+	topicPath := topicName + "/" + subscriptionName
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Create subscriber
+	subscriber := NewSubscriber(client, SubscriberConfig{
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
+	defer subscriber.Close()
+
+	// Subscribe to the topic
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	receiveChan, err := subscriber.Subscribe(subCtx, topicPath)
+	if err != nil {
+		t.Fatalf("Failed to subscribe to topic: %v", err)
+	}
+
+	t.Log("Initial topic subscription created successfully")
+
+	// Recreate receiver to simulate connection recovery
+	newReceiver, err := subscriber.recreateReceiver(topicPath)
+	if err != nil {
+		t.Fatalf("Failed to recreate receiver for topic: %v", err)
+	}
+
+	if newReceiver == nil {
+		t.Fatal("recreateReceiver returned nil receiver for topic")
+	}
+
+	t.Log("Topic receiver recreated successfully")
+
+	// Publish a message to the topic
+	publisher := NewPublisher(client, PublisherConfig{})
+	defer publisher.Close()
+
+	msg := &message.Message{
+		Payload: map[string]any{"content": "Message after topic recreation"},
+	}
+	msgChan := channel.FromValues(msg)
+	done, err := publisher.Publish(topicName, msgChan)
+	if err != nil {
+		t.Fatalf("Failed to publish to topic: %v", err)
+	}
+	<-done
+
+	// Receive the message with recreated receiver
+	select {
+	case msg := <-receiveChan:
+		t.Logf("Received message from recreated topic receiver: %v", msg.Payload)
+		msg.Ack()
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message from recreated topic receiver")
+	}
+
+	t.Log("Topic receiver successfully processed message after recreation")
+}
+
+// TestSubscriber_ConnectionRecovery tests end-to-end message receiving with simulated recovery
+func TestSubscriber_ConnectionRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test queue
+	queueName := GenerateTestName(t, "test-sub-recovery")
+	helper.CreateQueue(ctx, queueName)
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Create subscriber
+	subscriber := NewSubscriber(client, SubscriberConfig{
+		ReceiveTimeout:  5 * time.Second,
+		MaxMessageCount: 10,
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
+	defer subscriber.Close()
+
+	// Subscribe
+	subCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	receiveChan, err := subscriber.Subscribe(subCtx, queueName)
+	if err != nil {
+		t.Fatalf("Failed to subscribe: %v", err)
+	}
+
+	// Create publisher
+	publisher := NewPublisher(client, PublisherConfig{})
+	defer publisher.Close()
+
+	// Publish message before "connection loss"
+	msg1 := &message.Message{
+		Payload: map[string]any{"id": 1, "phase": "before"},
+	}
+	msgChan1 := channel.FromValues(msg1)
+	done1, err := publisher.Publish(queueName, msgChan1)
+	if err != nil {
+		t.Fatalf("Failed to publish message before recovery: %v", err)
+	}
+	<-done1
+
+	// Receive first message
+	select {
+	case msg := <-receiveChan:
+		t.Logf("Received message before recovery: %v", msg.Payload)
+		msg.Ack()
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message before recovery")
+	}
+
+	// Simulate connection recovery
+	_, err = subscriber.recreateReceiver(queueName)
+	if err != nil {
+		t.Fatalf("Failed to recreate receiver: %v", err)
+	}
+
+	t.Log("Simulated connection recovery")
+
+	// Publish message after "connection recovery"
+	msg2 := &message.Message{
+		Payload: map[string]any{"id": 2, "phase": "after"},
+	}
+	msgChan2 := channel.FromValues(msg2)
+	done2, err := publisher.Publish(queueName, msgChan2)
+	if err != nil {
+		t.Fatalf("Failed to publish message after recovery: %v", err)
+	}
+	<-done2
+
+	// Receive second message after recovery
+	select {
+	case msg := <-receiveChan:
+		t.Logf("Received message after recovery: %v", msg.Payload)
+		msg.Ack()
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message after recovery")
+	}
+
+	t.Log("Connection recovery test completed successfully")
+}
+
+// Helper function to check if string contains substring

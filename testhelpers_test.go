@@ -1,4 +1,4 @@
-package azservicebus_test
+package azservicebus
 
 import (
 	"context"

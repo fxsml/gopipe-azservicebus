@@ -1,4 +1,4 @@
-package azservicebus_test
+package azservicebus
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
-	azservicebuspkg "github.com/fxsml/gopipe-azservicebus"
 )
 
 // TestMessage is a simple test message structure
@@ -28,7 +27,7 @@ func TestConnection(t *testing.T) {
 	defer helper.Cleanup()
 
 	ctx := context.Background()
-	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	client, err := NewClient(helper.ConnectionString())
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
