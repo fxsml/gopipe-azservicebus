@@ -152,26 +152,7 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 	).Start(context.Background(), in)
 
 	s = &sender{
-		add: func(msgs <-chan *gopipe.Message[any]) (<-chan struct{}, error) {
-			// Create a buffered channel for messages to pass to FanIn
-			msgChan := make(chan *gopipe.Message[any])
-
-			// Add the channel to FanIn and get the done channel
-			fanDone, err := fan.Add(msgChan)
-			if err != nil {
-				return fanDone, err
-			}
-
-			// Forward messages from input to FanIn
-			go func() {
-				defer close(msgChan)
-				for msg := range msgs {
-					msgChan <- msg
-				}
-			}()
-
-			return fanDone, nil
-		},
+		add: fan.Add,
 		close: func() error {
 			cancel()
 			<-done
