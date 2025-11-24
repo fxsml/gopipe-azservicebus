@@ -3,6 +3,7 @@ package azservicebus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -60,6 +61,10 @@ type SubscriberConfig struct {
 	// UnmarshalFunc is a function to unmarshal the message payload
 	// Default: json.Unmarshal
 	UnmarshalFunc func([]byte, any) error
+
+	// ErrorHandler is called when an error occurs during message processing
+	// Default: no-op (errors are silently ignored)
+	ErrorHandler func(error)
 }
 
 func (c *SubscriberConfig) setDefaults() {
@@ -78,14 +83,21 @@ func (c *SubscriberConfig) setDefaults() {
 	if c.UnmarshalFunc == nil {
 		c.UnmarshalFunc = json.Unmarshal
 	}
+	if c.ErrorHandler == nil {
+		c.ErrorHandler = func(err error) {
+		}
+	}
 }
 
 // Subscribe subscribes to messages from the specified Azure Service Bus queue or topic.
 // Returns a channel of messages that will be continuously populated as messages arrive.
 // The subscription continues until the context is cancelled or the subscriber is closed.
 //
-// The queueOrTopic parameter should be a queue name for queue subscriptions.
-// For topic subscriptions, use SubscribeToTopic instead.
+// The queueOrTopic parameter should be:
+//   - A queue name for queue subscriptions (e.g., "my-queue")
+//   - A topic/subscription path for topic subscriptions (e.g., "my-topic/my-subscription")
+//
+// The method automatically detects the subscription type based on the presence of "/" in the input.
 // Messages are automatically unmarshaled from JSON.
 // Azure Service Bus message properties are mapped to message metadata.
 func (s *Subscriber) Subscribe(ctx context.Context, queueOrTopic string) (<-chan *message.Message, error) {
@@ -104,17 +116,36 @@ func (s *Subscriber) Subscribe(ctx context.Context, queueOrTopic string) (<-chan
 		return nil, fmt.Errorf("already subscribed to %s", queueOrTopic)
 	}
 
-	// Create Azure Service Bus receiver
-	sbReceiver, err := s.client.NewReceiverForQueue(queueOrTopic, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create receiver for queue %s: %w", queueOrTopic, err)
+	// Create Azure Service Bus receiver based on input format
+	var sbReceiver *azservicebus.Receiver
+	var err error
+
+	// Check if input contains "/" to determine if it's a topic/subscription or queue
+	if idx := indexOf(queueOrTopic, "/"); idx >= 0 {
+		// Topic subscription format: "topic/subscription"
+		topicName := queueOrTopic[:idx]
+		subscriptionName := queueOrTopic[idx+1:]
+		sbReceiver, err = s.client.NewReceiverForSubscription(topicName, subscriptionName, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create receiver for topic %s subscription %s: %w", topicName, subscriptionName, err)
+		}
+	} else {
+		// Queue format
+		sbReceiver, err = s.client.NewReceiverForQueue(queueOrTopic, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create receiver for queue %s: %w", queueOrTopic, err)
+		}
 	}
 
 	// Create cancellable context for this subscription
 	subCtx, cancel := context.WithCancel(ctx)
 
 	// Use gopipe.NewGenerator to continuously fetch messages
-	generator := gopipe.NewGenerator(s.generateMessages(subCtx, sbReceiver))
+	generator := gopipe.NewGenerator(s.generateMessages(sbReceiver),
+		gopipe.WithCancel[struct{}, *message.Message](func(in struct{}, err error) {
+			s.config.ErrorHandler(err)
+		}))
+
 	msgChan := generator.Generate(subCtx)
 
 	// Track receiver for cleanup
@@ -130,58 +161,8 @@ func (s *Subscriber) Subscribe(ctx context.Context, queueOrTopic string) (<-chan
 	return msgChan, nil
 }
 
-// SubscribeToTopic subscribes to messages from the specified Azure Service Bus topic and subscription.
-// Returns a channel of messages that will be continuously populated as messages arrive.
-// The subscription continues until the context is cancelled or the subscriber is closed.
-//
-// Messages are automatically unmarshaled from JSON.
-// Azure Service Bus message properties are mapped to message metadata.
-func (s *Subscriber) SubscribeToTopic(ctx context.Context, topicName, subscriptionName string) (<-chan *message.Message, error) {
-	s.closedMu.RLock()
-	if s.closed {
-		s.closedMu.RUnlock()
-		return nil, fmt.Errorf("subscriber is closed")
-	}
-	defer s.closedMu.RUnlock()
-
-	key := topicName + "/" + subscriptionName
-
-	// Check if receiver already exists
-	s.receiverMu.RLock()
-	_, exists := s.receivers[key]
-	s.receiverMu.RUnlock()
-	if exists {
-		return nil, fmt.Errorf("already subscribed to %s", key)
-	}
-
-	// Create Azure Service Bus receiver
-	sbReceiver, err := s.client.NewReceiverForSubscription(topicName, subscriptionName, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create receiver for topic %s subscription %s: %w", topicName, subscriptionName, err)
-	}
-
-	// Create cancellable context for this subscription
-	subCtx, cancel := context.WithCancel(ctx)
-
-	// Use gopipe.NewGenerator to continuously fetch messages
-	generator := gopipe.NewGenerator(s.generateMessages(subCtx, sbReceiver))
-	msgChan := generator.Generate(subCtx)
-
-	// Track receiver for cleanup
-	r := &receiver{
-		sbReceiver: sbReceiver,
-		cancel:     cancel,
-	}
-
-	s.receiverMu.Lock()
-	s.receivers[key] = r
-	s.receiverMu.Unlock()
-
-	return msgChan, nil
-}
-
 // generateMessages returns a function that continuously fetches messages from Azure Service Bus
-func (s *Subscriber) generateMessages(ctx context.Context, sbReceiver *azservicebus.Receiver) func(context.Context) ([]*message.Message, error) {
+func (s *Subscriber) generateMessages(sbReceiver *azservicebus.Receiver) func(context.Context) ([]*message.Message, error) {
 	return func(ctx context.Context) ([]*message.Message, error) {
 		// Check if subscriber is closed
 		s.closedMu.RLock()
@@ -196,7 +177,14 @@ func (s *Subscriber) generateMessages(ctx context.Context, sbReceiver *azservice
 
 		messages, err := sbReceiver.ReceiveMessages(receiveCtx, s.config.MaxMessageCount, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to receive messages: %w", err)
+			// If context was canceled, return empty result without error to stop gracefully
+			if errors.Is(err, context.Canceled) {
+				return []*message.Message{}, nil
+			}
+			// For other errors, call error handler and return the error
+			receiveErr := fmt.Errorf("failed to receive messages: %w", err)
+			s.config.ErrorHandler(receiveErr)
+			return nil, receiveErr
 		}
 
 		// Transform Azure Service Bus messages to gopipe messages
@@ -321,4 +309,15 @@ func (s *Subscriber) Close() error {
 	}
 
 	return nil
+}
+
+// indexOf returns the index of the first occurrence of the character in the string,
+// or -1 if not found
+func indexOf(s string, char string) int {
+	for i := range s {
+		if s[i] == char[0] {
+			return i
+		}
+	}
+	return -1
 }

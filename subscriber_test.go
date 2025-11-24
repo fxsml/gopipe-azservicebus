@@ -73,6 +73,9 @@ func TestSubscriber_EndToEnd(t *testing.T) {
 	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 5,
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
 	})
 	defer subscriber.Close()
 
@@ -170,6 +173,9 @@ func TestSubscriber_MessageMetadata(t *testing.T) {
 	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 1,
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
 	})
 	defer subscriber.Close()
 
@@ -229,7 +235,11 @@ func TestSubscriber_ClosedSubscriberReturnsError(t *testing.T) {
 	}
 	defer client.Close(ctx)
 
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{})
+	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
 
 	// Close the subscriber
 	if err := subscriber.Close(); err != nil {
@@ -268,7 +278,11 @@ func TestSubscriber_CloseIdempotent(t *testing.T) {
 	}
 	defer client.Close(ctx)
 
-	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{})
+	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
 
 	// Close multiple times
 	if err := subscriber.Close(); err != nil {
@@ -309,6 +323,9 @@ func TestSubscriber_PublishSubscribeRoundtrip(t *testing.T) {
 	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 10,
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
 	})
 	defer subscriber.Close()
 
@@ -374,4 +391,154 @@ func TestSubscriber_PublishSubscribeRoundtrip(t *testing.T) {
 	if receivedCount != messageCount {
 		t.Errorf("Expected %d messages, received %d", messageCount, receivedCount)
 	}
+}
+
+// TestSubscriber_AutoDetectQueueAndTopic verifies that Subscribe() automatically detects
+// whether the input is a queue or topic based on the presence of "/"
+func TestSubscriber_AutoDetectQueueAndTopic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	// Test 1: Queue (no "/" in name)
+	queueName := GenerateTestName(t, "test-autodetect-queue")
+	helper.CreateQueue(ctx, queueName)
+	t.Logf("Testing queue auto-detection with: %s", queueName)
+
+	// Create client
+	client, err := azservicebuspkg.NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	// Create subscriber
+	subscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
+	defer func() {
+		if err := subscriber.Close(); err != nil {
+			t.Errorf("Failed to close subscriber: %v", err)
+		}
+	}()
+
+	// Publish test messages to queue
+	messages := []*message.Message{
+		message.NewMessage(
+			&message.Properties{},
+			map[string]any{"type": "queue", "content": "Queue message"},
+			time.Time{},
+			nil,
+			nil,
+		),
+	}
+	msgChan := channel.FromValues(messages...)
+
+	publisher := azservicebuspkg.NewPublisher(client, azservicebuspkg.PublisherConfig{})
+	defer publisher.Close()
+
+	publishDone, err := publisher.Publish(queueName, msgChan)
+	if err != nil {
+		t.Fatalf("Failed to publish: %v", err)
+	}
+	<-publishDone
+
+	// Subscribe using auto-detection (no "/" should be treated as queue)
+	subCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	receiveMsgChan, err := subscriber.Subscribe(subCtx, queueName)
+	if err != nil {
+		t.Fatalf("Failed to subscribe to queue: %v", err)
+	}
+
+	// Receive message
+	select {
+	case msg := <-receiveMsgChan:
+		payloadMap, ok := msg.Payload.(map[string]any)
+		if !ok {
+			t.Fatalf("Expected map[string]any, got %T", msg.Payload)
+		}
+		if payloadMap["type"] != "queue" {
+			t.Errorf("Expected type=queue, got %v", payloadMap["type"])
+		}
+		if !msg.Ack() {
+			t.Errorf("Failed to ack message")
+		}
+		t.Log("Successfully received message from queue using auto-detection")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message from queue")
+	}
+
+	// Test 2: Topic (with "/" in format: topic/subscription)
+	topicName := GenerateTestName(t, "test-autodetect-topic")
+	subscriptionName := "test-sub"
+	helper.CreateTopic(ctx, topicName)
+	helper.CreateSubscription(ctx, topicName, subscriptionName)
+	topicPath := topicName + "/" + subscriptionName
+	t.Logf("Testing topic auto-detection with: %s", topicPath)
+
+	// Create a new subscriber for the topic
+	topicSubscriber := azservicebuspkg.NewSubscriber(client, azservicebuspkg.SubscriberConfig{
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in topic subscriber: %v", err)
+		},
+	})
+	defer func() {
+		if err := topicSubscriber.Close(); err != nil {
+			t.Errorf("Failed to close topic subscriber: %v", err)
+		}
+	}()
+
+	// Publish test messages to topic
+	topicMessages := []*message.Message{
+		message.NewMessage(
+			&message.Properties{},
+			map[string]any{"type": "topic", "content": "Topic message"},
+			time.Time{},
+			nil,
+			nil,
+		),
+	}
+	topicMsgChan := channel.FromValues(topicMessages...)
+
+	publishDone2, err := publisher.Publish(topicName, topicMsgChan)
+	if err != nil {
+		t.Fatalf("Failed to publish to topic: %v", err)
+	}
+	<-publishDone2
+
+	// Subscribe using auto-detection (with "/" should be treated as topic/subscription)
+	topicSubCtx, topicCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer topicCancel()
+
+	topicReceiveMsgChan, err := topicSubscriber.Subscribe(topicSubCtx, topicPath)
+	if err != nil {
+		t.Fatalf("Failed to subscribe to topic: %v", err)
+	}
+
+	// Receive message
+	select {
+	case msg := <-topicReceiveMsgChan:
+		payloadMap, ok := msg.Payload.(map[string]any)
+		if !ok {
+			t.Fatalf("Expected map[string]any, got %T", msg.Payload)
+		}
+		if payloadMap["type"] != "topic" {
+			t.Errorf("Expected type=topic, got %v", payloadMap["type"])
+		}
+		if !msg.Ack() {
+			t.Errorf("Failed to ack message")
+		}
+		t.Log("Successfully received message from topic using auto-detection")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message from topic")
+	}
+
+	t.Log("Auto-detection test completed successfully")
 }
