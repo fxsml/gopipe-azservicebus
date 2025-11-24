@@ -14,8 +14,10 @@ import (
 )
 
 type receiver struct {
-	sbReceiver *azservicebus.Receiver
-	cancel     func()
+	sbReceiver   *azservicebus.Receiver
+	receiverKey  string
+	cancel       func()
+	recreateLock sync.Mutex
 }
 
 // Subscriber implements subscription from Azure Service Bus for gopipe pipelines
@@ -140,51 +142,86 @@ func (s *Subscriber) Subscribe(ctx context.Context, queueOrTopic string) (<-chan
 	// Create cancellable context for this subscription
 	subCtx, cancel := context.WithCancel(ctx)
 
-	// Use gopipe.NewGenerator to continuously fetch messages
-	generator := gopipe.NewGenerator(s.generateMessages(sbReceiver),
-		gopipe.WithCancel[struct{}, *message.Message](func(in struct{}, err error) {
-			s.config.ErrorHandler(err)
-		}))
-
-	msgChan := generator.Generate(subCtx)
-
 	// Track receiver for cleanup
 	r := &receiver{
-		sbReceiver: sbReceiver,
-		cancel:     cancel,
+		sbReceiver:  sbReceiver,
+		receiverKey: queueOrTopic,
+		cancel:      cancel,
 	}
 
 	s.receiverMu.Lock()
 	s.receivers[queueOrTopic] = r
 	s.receiverMu.Unlock()
 
+	// Use gopipe.NewGenerator to continuously fetch messages
+	generator := gopipe.NewGenerator(s.generateMessages(queueOrTopic),
+		gopipe.WithCancel[struct{}, *message.Message](func(in struct{}, err error) {
+			s.config.ErrorHandler(err)
+		}))
+
+	msgChan := generator.Generate(subCtx)
+
 	return msgChan, nil
 }
 
 // generateMessages returns a function that continuously fetches messages from Azure Service Bus
-func (s *Subscriber) generateMessages(sbReceiver *azservicebus.Receiver) func(context.Context) ([]*message.Message, error) {
+func (s *Subscriber) generateMessages(queueOrTopic string) func(context.Context) ([]*message.Message, error) {
 	return func(ctx context.Context) ([]*message.Message, error) {
 		// Check if subscriber is closed
 		s.closedMu.RLock()
-		defer s.closedMu.RUnlock()
 		if s.closed {
+			s.closedMu.RUnlock()
 			return nil, fmt.Errorf("subscriber is closed")
 		}
+		s.closedMu.RUnlock()
 
-		// Receive messages with timeout
-		receiveCtx, cancel := context.WithTimeout(ctx, s.config.ReceiveTimeout)
-		defer cancel()
+		// Get the current receiver
+		s.receiverMu.RLock()
+		r, exists := s.receivers[queueOrTopic]
+		s.receiverMu.RUnlock()
+		if !exists {
+			return nil, fmt.Errorf("receiver not found for %s", queueOrTopic)
+		}
 
-		messages, err := sbReceiver.ReceiveMessages(receiveCtx, s.config.MaxMessageCount, nil)
+		sbReceiver := r.sbReceiver
+
+		// Attempt to receive messages
+		messages, err := s.attemptReceiveMessages(ctx, sbReceiver)
 		if err != nil {
 			// If context was canceled, return empty result without error to stop gracefully
 			if errors.Is(err, context.Canceled) {
 				return []*message.Message{}, nil
 			}
-			// For other errors, call error handler and return the error
-			receiveErr := fmt.Errorf("failed to receive messages: %w", err)
-			s.config.ErrorHandler(receiveErr)
-			return nil, receiveErr
+
+			// Check if it's a connection lost or closed error (includes idle timeout)
+			var sbErr *azservicebus.Error
+			if errors.As(err, &sbErr) && (sbErr.Code == azservicebus.CodeConnectionLost || sbErr.Code == azservicebus.CodeClosed) {
+				// Recreate the receiver and retry
+				newReceiver, recreateErr := s.recreateReceiver(queueOrTopic)
+				if recreateErr != nil {
+					// For recreation errors, call error handler and return
+					receiveErr := fmt.Errorf("failed to recreate receiver after connection loss: %w", recreateErr)
+					s.config.ErrorHandler(receiveErr)
+					return nil, receiveErr
+				}
+
+				// Retry receiving with new receiver
+				messages, err = s.attemptReceiveMessages(ctx, newReceiver)
+				if err != nil {
+					// If context was canceled, return empty result without error
+					if errors.Is(err, context.Canceled) {
+						return []*message.Message{}, nil
+					}
+					receiveErr := fmt.Errorf("failed to receive messages after recreating receiver: %w", err)
+					s.config.ErrorHandler(receiveErr)
+					return nil, receiveErr
+				}
+			} else {
+				// For other errors, call error handler and return the error
+				receiveErr := fmt.Errorf("failed to receive messages: %w", err)
+				s.config.ErrorHandler(receiveErr)
+				return nil, receiveErr
+			}
 		}
 
 		// Transform Azure Service Bus messages to gopipe messages
@@ -199,6 +236,70 @@ func (s *Subscriber) generateMessages(sbReceiver *azservicebus.Receiver) func(co
 
 		return result, nil
 	}
+}
+
+// attemptReceiveMessages attempts to receive messages from Azure Service Bus with timeout
+func (s *Subscriber) attemptReceiveMessages(ctx context.Context, sbReceiver *azservicebus.Receiver) ([]*azservicebus.ReceivedMessage, error) {
+	receiveCtx, cancel := context.WithTimeout(ctx, s.config.ReceiveTimeout)
+	defer cancel()
+
+	messages, err := sbReceiver.ReceiveMessages(receiveCtx, s.config.MaxMessageCount, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return messages, nil
+}
+
+// recreateReceiver closes and recreates a receiver for the given topic/queue
+func (s *Subscriber) recreateReceiver(queueOrTopic string) (*azservicebus.Receiver, error) {
+	s.receiverMu.Lock()
+	defer s.receiverMu.Unlock()
+
+	// Check if we're closing
+	s.closedMu.RLock()
+	if s.closed {
+		s.closedMu.RUnlock()
+		return nil, fmt.Errorf("subscriber is closing, cannot recreate receiver")
+	}
+	s.closedMu.RUnlock()
+
+	r, exists := s.receivers[queueOrTopic]
+	if !exists {
+		return nil, fmt.Errorf("receiver not found for %s", queueOrTopic)
+	}
+
+	// Close old receiver if it exists
+	if r.sbReceiver != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), s.config.CloseTimeout)
+		defer cancel()
+		_ = r.sbReceiver.Close(ctx) // Best effort close, ignore errors
+	}
+
+	// Create new receiver based on format (queue vs topic/subscription)
+	var newSbReceiver *azservicebus.Receiver
+	var err error
+
+	if idx := indexOf(queueOrTopic, "/"); idx >= 0 {
+		// Topic subscription format: "topic/subscription"
+		topicName := queueOrTopic[:idx]
+		subscriptionName := queueOrTopic[idx+1:]
+		newSbReceiver, err = s.client.NewReceiverForSubscription(topicName, subscriptionName, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to recreate receiver for topic %s subscription %s: %w", topicName, subscriptionName, err)
+		}
+	} else {
+		// Queue format
+		newSbReceiver, err = s.client.NewReceiverForQueue(queueOrTopic, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to recreate receiver for queue %s: %w", queueOrTopic, err)
+		}
+	}
+
+	// Update the receiver reference
+	r.sbReceiver = newSbReceiver
+
+	return newSbReceiver, nil
 }
 
 // transformMessage transforms an Azure Service Bus ReceivedMessage to a gopipe Message

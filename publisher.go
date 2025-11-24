@@ -3,6 +3,7 @@ package azservicebus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -13,8 +14,9 @@ import (
 )
 
 type sender struct {
-	add   func(msgs <-chan *message.Message) (<-chan struct{}, error)
-	close func() error
+	sbSender *azservicebus.Sender
+	add      func(msgs <-chan *message.Message) (<-chan struct{}, error)
+	close    func() error
 }
 
 // Publisher implements the gopipe Publisher interface for Azure Service Bus
@@ -147,13 +149,14 @@ func (p *Publisher) getOrCreateSender(queueOrTopic string) (*sender, error) {
 
 	// Batch messages before sending
 	done := gopipe.NewBatchPipe(
-		p.publishMessageBatch(sbSender),
+		p.publishMessageBatch(queueOrTopic),
 		p.config.BatchMaxSize,
 		p.config.BatchMaxDuration,
 	).Start(context.Background(), in)
 
 	s = &sender{
-		add: fan.Add,
+		sbSender: sbSender,
+		add:      fan.Add,
 		close: func() error {
 			cancel()
 			<-done
@@ -219,35 +222,106 @@ func (p *Publisher) transformMessage(_ context.Context, msg *message.Message) (*
 	return sbMsg, nil
 }
 
-func (p *Publisher) publishMessageBatch(sender *azservicebus.Sender) func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {
+func (p *Publisher) publishMessageBatch(queueOrTopic string) func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {
 	return func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {
 		// Check if publisher is closed
 		p.closedMu.RLock()
-		defer p.closedMu.RUnlock()
 		if p.closed {
+			p.closedMu.RUnlock()
 			return nil, fmt.Errorf("publisher is closed")
 		}
+		p.closedMu.RUnlock()
 
-		batch, err := sender.NewMessageBatch(ctx, nil)
+		// Get the current sender
+		p.senderMu.RLock()
+		s, exists := p.senders[queueOrTopic]
+		p.senderMu.RUnlock()
+		if !exists {
+			return nil, fmt.Errorf("sender not found for %s", queueOrTopic)
+		}
+
+		sender := s.sbSender
+
+		// Attempt to send message batch
+		err := p.attemptSendBatch(ctx, sender, i)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create message batch: %w", err)
-		}
+			// Check if it's a connection lost or closed error (includes idle timeout)
+			var sbErr *azservicebus.Error
+			if errors.As(err, &sbErr) && (sbErr.Code == azservicebus.CodeConnectionLost || sbErr.Code == azservicebus.CodeClosed) {
+				// Recreate the sender and retry once
+				newSender, recreateErr := p.recreateSender(queueOrTopic)
+				if recreateErr != nil {
+					return nil, fmt.Errorf("failed to recreate sender after connection loss: %w", recreateErr)
+				}
 
-		for _, msg := range i {
-			if err := batch.AddMessage(msg, nil); err != nil {
-				return nil, fmt.Errorf("failed to add message to batch: %w", err)
+				// Retry sending with new sender
+				if err := p.attemptSendBatch(ctx, newSender, i); err != nil {
+					return nil, fmt.Errorf("failed to send message batch after recreating sender: %w", err)
+				}
+				return nil, nil
 			}
-		}
-
-		// Send message with timeout
-		publishCtx, cancel := context.WithTimeout(ctx, p.config.PublishTimeout)
-		defer cancel()
-		if err := sender.SendMessageBatch(publishCtx, batch, nil); err != nil {
-			return nil, fmt.Errorf("failed to send message batch: %w", err)
+			return nil, err
 		}
 
 		return nil, nil
 	}
+}
+
+// attemptSendBatch attempts to send a batch of messages with the given sender
+func (p *Publisher) attemptSendBatch(ctx context.Context, sender *azservicebus.Sender, messages []*azservicebus.Message) error {
+	batch, err := sender.NewMessageBatch(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create message batch: %w", err)
+	}
+
+	for _, msg := range messages {
+		if err := batch.AddMessage(msg, nil); err != nil {
+			return fmt.Errorf("failed to add message to batch: %w", err)
+		}
+	}
+
+	// Send message with timeout
+	publishCtx, cancel := context.WithTimeout(ctx, p.config.PublishTimeout)
+	defer cancel()
+	if err := sender.SendMessageBatch(publishCtx, batch, nil); err != nil {
+		return fmt.Errorf("failed to send message batch: %w", err)
+	}
+
+	return nil
+}
+
+// recreateSender closes and recreates a sender for the given topic/queue
+func (p *Publisher) recreateSender(queueOrTopic string) (*azservicebus.Sender, error) {
+	p.senderMu.Lock()
+	defer p.senderMu.Unlock()
+
+	// Check if we're closing
+	p.closedMu.RLock()
+	if p.closed {
+		p.closedMu.RUnlock()
+		return nil, fmt.Errorf("publisher is closing, cannot recreate sender")
+	}
+	p.closedMu.RUnlock()
+
+	// Close old sender if it exists
+	if oldSender, exists := p.senders[queueOrTopic]; exists && oldSender.sbSender != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), p.config.CloseTimeout)
+		defer cancel()
+		_ = oldSender.sbSender.Close(ctx) // Best effort close, ignore errors
+	}
+
+	// Create new sender
+	newSbSender, err := p.client.NewSender(queueOrTopic, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new sender: %w", err)
+	}
+
+	// Update the sender reference
+	if s, exists := p.senders[queueOrTopic]; exists {
+		s.sbSender = newSbSender
+	}
+
+	return newSbSender, nil
 }
 
 // Close gracefully shuts down the publisher
