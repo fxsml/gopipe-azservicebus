@@ -1,4 +1,4 @@
-.PHONY: help emulator-start emulator-stop emulator-restart emulator-logs emulator-status test test-integration test-unit clean
+.PHONY: help emulator-start emulator-stop emulator-restart emulator-logs emulator-status test test-integration test-unit clean claude-yolo claude-attach claude-stop
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -64,6 +64,25 @@ clean: ## Clean up
 	rm -f coverage.out coverage.html
 	docker compose down -v
 	@echo "Cleaned up test artifacts and stopped emulator"
+
+claude-yolo: ## Spin up Claude Code container and clone this repo on main
+	@echo "Starting Claude Code container..."
+	docker run -d --name gopipe-azservicebus-claude \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-e ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) \
+		ghcr.io/anthropics/claude-code:latest \
+		bash -c "git clone -b main https://github.com/fxsml/gopipe-azservicebus.git /workspace && cd /workspace && exec bash"
+	@echo "Container started. Use 'make claude-attach' to connect."
+
+claude-attach: ## Attach to Claude Code in the container
+	@echo "Attaching to Claude Code..."
+	docker exec -it gopipe-azservicebus-claude bash -c "cd /workspace && claude"
+
+claude-stop: ## Stop and remove Claude Code container
+	@echo "Stopping Claude Code container..."
+	docker stop gopipe-azservicebus-claude || true
+	docker rm gopipe-azservicebus-claude || true
+	@echo "Container stopped and removed."
 
 verify: fmt vet ## Run formatting and vetting
 
