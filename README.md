@@ -1,21 +1,14 @@
 # gopipe-azservicebus
 
-Azure Service Bus integration for the [gopipe](https://github.com/fxsml/gopipe) pipeline framework.
-
-## Overview
-
-`gopipe-azservicebus` provides Azure Service Bus adapters that enable pipeline stages to consume from and publish to Azure Service Bus queues and topics. It implements the Publisher and Subscriber patterns with full support for message acknowledgment, metadata handling, and concurrent processing.
+Azure Service Bus integration for the gopipe pipeline framework.
 
 ## Features
 
-- **Subscriber**: Consume messages from Azure Service Bus queues and topic subscriptions
-- **Publisher**: Publish messages to Azure Service Bus queues and topics
-- **Message Mapping**: Automatic conversion between gopipe.Message and Azure Service Bus messages
-- **Metadata Support**: Full support for Service Bus properties (MessageID, CorrelationID, Subject, etc.)
-- **Concurrent Processing**: Configurable concurrent message processing
-- **Graceful Shutdown**: Proper handling of in-flight messages during shutdown
-- **Error Handling**: Automatic message redelivery on failure (Nack) with dead-letter queue support
-- **Flexible Authentication**: Support for both connection strings and DefaultAzureCredential
+- **Publisher**: Publish messages from gopipe pipelines to Azure Service Bus queues and topics
+- **Subscriber**: Consume messages from Azure Service Bus and feed them into gopipe pipelines (planned)
+- **Local Development**: Run tests against the Azure Service Bus emulator
+- **Message Mapping**: Automatic conversion between gopipe messages and Azure Service Bus messages
+- **Metadata Support**: Full support for message properties and application properties
 
 ## Installation
 
@@ -25,376 +18,178 @@ go get github.com/fxsml/gopipe-azservicebus
 
 ## Quick Start
 
-### Subscriber Example
+### Publishing Messages
 
 ```go
 package main
 
 import (
     "context"
-    "log"
 
-    azservicebus "github.com/fxsml/gopipe-azservicebus"
-)
-
-type MyMessage struct {
-    ID      string `json:"id"`
-    Content string `json:"content"`
-}
-
-func main() {
-    // Create Azure Service Bus client
-    client, err := azservicebus.NewClient("Endpoint=sb://your-namespace.servicebus.windows.net/;...")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer client.Close(context.Background())
-
-    // Create subscriber with default configuration
-    subscriber := azservicebus.NewSubscriber[MyMessage](client, azservicebus.DefaultSubscriberConfig())
-    defer subscriber.Close()
-
-    // Subscribe to a queue
-    ctx := context.Background()
-    messages, err := subscriber.Subscribe(ctx, "myqueue")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Process messages
-    for msg := range messages {
-        log.Printf("Received: %s", msg.Payload.Content)
-
-        // Acknowledge successful processing
-        msg.Ack()
-
-        // Or reject for redelivery
-        // msg.Nack(err)
-    }
-}
-```
-
-### Publisher Example
-
-```go
-package main
-
-import (
-    "context"
-    "log"
-    "time"
-
-    azservicebus "github.com/fxsml/gopipe-azservicebus"
     "github.com/fxsml/gopipe"
+    azservicebus "github.com/fxsml/gopipe-azservicebus"
+    "github.com/fxsml/gopipe/channel"
 )
 
-type MyMessage struct {
-    ID      string `json:"id"`
-    Content string `json:"content"`
-}
-
 func main() {
-    // Create Azure Service Bus client
-    client, err := azservicebus.NewClient("Endpoint=sb://your-namespace.servicebus.windows.net/;...")
+    // Create client using connection string
+    client, err := azservicebus.NewClient("Endpoint=sb://...")
     if err != nil {
-        log.Fatal(err)
+        panic(err)
     }
     defer client.Close(context.Background())
 
     // Create publisher
-    publisher := azservicebus.NewPublisher[MyMessage](client, azservicebus.DefaultPublisherConfig())
+    publisher := azservicebus.NewPublisher(client, azservicebus.PublisherConfig{})
     defer publisher.Close()
 
-    // Create message channel
-    msgChan := make(chan *gopipe.Message[MyMessage], 10)
-
-    // Publish messages
-    ctx := context.Background()
-    done, err := publisher.Publish(ctx, "myqueue", msgChan)
-    if err != nil {
-        log.Fatal(err)
+    // Create and publish message
+    msg := &gopipe.Message[any]{
+        Payload: map[string]string{"hello": "world"},
     }
+    msg.Properties().Set("message_id", "123")
 
-    // Send messages
-    go func() {
-        metadata := gopipe.Metadata{
-            "message_id": "msg-1",
-            "content_type": "application/json",
-        }
-
-        msg := gopipe.NewMessage(
-            metadata,
-            MyMessage{ID: "msg-1", Content: "Hello, Service Bus!"},
-            time.Time{}, // No deadline
-            func() { log.Println("Message acknowledged") },
-            func(err error) { log.Printf("Message rejected: %v", err) },
-        )
-
-        msgChan <- msg
-        close(msgChan)
-    }()
-
-    // Wait for completion
-    <-done
+    err = publisher.Publish("my-queue", channel.FromValues(msg))
+    if err != nil {
+        panic(err)
+    }
 }
+```
+
+## Local Development with Emulator
+
+The project includes Docker Compose configuration for running the Azure Service Bus emulator locally.
+
+### Prerequisites
+
+- Docker Desktop for Mac (with Rosetta 2 support for Apple Silicon)
+- Go 1.24 or later
+
+### Start the Emulator
+
+```bash
+make emulator-start
+```
+
+See [EMULATOR.md](EMULATOR.md) for detailed emulator setup instructions and troubleshooting.
+
+### Run Tests
+
+```bash
+# All tests
+make test
+
+# Integration tests only (requires emulator)
+make test-integration
+
+# Unit tests only
+make test-unit
 ```
 
 ## Configuration
-
-### Subscriber Configuration
-
-```go
-config := azservicebus.SubscriberConfig{
-    BatchSize:          10,               // Number of messages to receive per batch
-    MessageTimeout:     60 * time.Second, // Max time for processing a message
-    AbandonTimeout:     30 * time.Second, // Timeout for abandon operations
-    CompleteTimeout:    30 * time.Second, // Timeout for complete operations
-    CloseTimeout:       30 * time.Second, // Timeout for closing receivers
-    ConcurrentMessages: 5,                // Number of concurrent messages to process
-}
-
-subscriber := azservicebus.NewSubscriber[MyMessage](client, config)
-```
 
 ### Publisher Configuration
 
 ```go
 config := azservicebus.PublisherConfig{
-    PublishTimeout: 30 * time.Second, // Timeout for publish operations
-    CloseTimeout:   30 * time.Second, // Timeout for closing senders
+    PublishTimeout:      30 * time.Second,  // Timeout for publish operations
+    CloseTimeout:        30 * time.Second,  // Timeout for closing senders
+    ShutdownTimeout:     60 * time.Second,  // Maximum graceful shutdown time
+    BatchMaxSize:        1,                 // Messages per batch
+    BatchMaxDuration:    0,                 // Batch wait time
+    MarshalFunc:         json.Marshal,      // Custom marshaler
 }
 
-publisher := azservicebus.NewPublisher[MyMessage](client, config)
+publisher := azservicebus.NewPublisher(client, config)
 ```
 
-### Default Configurations
+### Authentication
+
+The library supports two authentication methods:
 
 ```go
-// Use default configurations
-subscriberConfig := azservicebus.DefaultSubscriberConfig()
-publisherConfig := azservicebus.DefaultPublisherConfig()
-```
+// Connection string (for development/testing)
+client, err := azservicebus.NewClient("Endpoint=sb://...")
 
-## Authentication
-
-### Connection String
-
-```go
-client, err := azservicebus.NewClient(
-    "Endpoint=sb://your-namespace.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
-)
-```
-
-### DefaultAzureCredential (Recommended for Production)
-
-```go
+// DefaultAzureCredential (recommended for production)
 client, err := azservicebus.NewClient("your-namespace.servicebus.windows.net")
 ```
 
-This uses [DefaultAzureCredential](https://pkg.go.dev/github.com/Azure/azure-sdk-for-go/sdk/azidentity#DefaultAzureCredential) which supports:
-- Managed Identity
-- Azure CLI credentials
-- Environment variables
-- And more...
+## Message Metadata
 
-## Topic Subscriptions
+Gopipe message properties are automatically mapped to Azure Service Bus message properties:
 
-To subscribe to a topic subscription, use the format `"topic/subscription"`:
-
-```go
-messages, err := subscriber.Subscribe(ctx, "mytopic/mysubscription")
-```
-
-## Metadata Mapping
-
-Service Bus properties are automatically mapped to gopipe.Metadata:
-
-| Service Bus Property | Metadata Key      |
-|---------------------|-------------------|
-| MessageID           | message_id        |
-| Subject             | subject           |
-| CorrelationID       | correlation_id    |
-| ContentType         | content_type      |
-| To                  | to                |
-| ReplyTo             | reply_to          |
-| SessionID           | session_id        |
-| ApplicationProperties | Preserved as-is |
-
-When publishing, these metadata keys are automatically mapped back to Service Bus properties.
-
-## Message Acknowledgment
-
-### Non-Blocking Design
-The subscriber uses a **non-blocking acknowledgment model**. When you receive a message from the channel, the subscriber does not wait for you to call `Ack()` or `Nack()`. Instead:
-
-1. The message is sent to your channel immediately with a deadline
-2. When you call `Ack()` or `Nack()`, the Service Bus operation executes directly
-3. The gopipe.Message implementation ensures ack/nack is only called once
-
-This design allows for parallel downstream processing without blocking the subscriber. No waiting goroutines are created - the ack/nack functions directly wrap the Service Bus operations.
-
-### Ack (Success)
-Call `msg.Ack()` to mark a message as successfully processed. This directly calls `CompleteMessage` on the Service Bus receiver, removing the message from the queue.
+- `message_id` → MessageID
+- `subject` → Subject
+- `correlation_id` → CorrelationID
+- `content_type` → ContentType
+- `to` → To
+- `reply_to` → ReplyTo
+- `session_id` → SessionID
+- All other properties → ApplicationProperties
 
 ```go
-msg.Ack()
-```
-
-### Nack (Failure)
-Call `msg.Nack(err)` to reject a message. This directly calls `AbandonMessage` on the Service Bus receiver, allowing the message to be redelivered (subject to the queue's max delivery count).
-
-```go
-if err := processMessage(msg); err != nil {
-    msg.Nack(err)
-    continue
-}
-```
-
-### Message Deadline
-Each message has a deadline set to `time.Now() + MessageTimeout`. The deadline is advisory - it's up to your processing code or the gopipe pipeline to respect it. The subscriber itself doesn't enforce the deadline with background goroutines.
-
-```go
-config := azservicebus.DefaultSubscriberConfig()
-config.MessageTimeout = 120 * time.Second // Set deadline duration
-
-// In your processing code, check the deadline:
-if time.Now().After(msg.Deadline()) {
-    msg.Nack(fmt.Errorf("processing deadline exceeded"))
-    continue
-}
-```
-
-## Concurrent Processing
-
-The subscriber supports concurrent message processing:
-
-```go
-config := azservicebus.DefaultSubscriberConfig()
-config.ConcurrentMessages = 10 // Process up to 10 messages concurrently
-
-subscriber := azservicebus.NewSubscriber[MyMessage](client, config)
-```
-
-Note: Downstream pipeline stages handle their own concurrency. The subscriber's `ConcurrentMessages` setting controls how many messages are being processed *at the receiver level* before being sent to the pipeline.
-
-## Error Handling
-
-- **Transient Errors**: Automatically retried by the Azure SDK
-- **Processing Errors**: Call `msg.Nack(err)` to allow redelivery
-- **Fatal Errors**: Close the subscriber/publisher to clean up resources
-- **Dead Letter Queue**: Messages that exceed max delivery count are automatically moved to the dead-letter queue by Service Bus
-
-## Graceful Shutdown
-
-Both Subscriber and Publisher support graceful shutdown:
-
-```go
-// Close waits for in-flight messages to complete (with timeout)
-subscriber.Close()
-publisher.Close()
-```
-
-## Complete Pipeline Example
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-
-    azservicebus "github.com/fxsml/gopipe-azservicebus"
-    "github.com/fxsml/gopipe"
-)
-
-type InputMessage struct {
-    ID   string `json:"id"`
-    Text string `json:"text"`
-}
-
-type OutputMessage struct {
-    ID        string `json:"id"`
-    Processed string `json:"processed"`
-}
-
-func main() {
-    client, _ := azservicebus.NewClient("Endpoint=sb://...")
-    defer client.Close(context.Background())
-
-    // Create subscriber for input queue
-    subscriber := azservicebus.NewSubscriber[InputMessage](
-        client,
-        azservicebus.DefaultSubscriberConfig(),
-    )
-    defer subscriber.Close()
-
-    // Create publisher for output queue
-    publisher := azservicebus.NewPublisher[OutputMessage](
-        client,
-        azservicebus.DefaultPublisherConfig(),
-    )
-    defer publisher.Close()
-
-    ctx := context.Background()
-
-    // Subscribe to input
-    inputMessages, _ := subscriber.Subscribe(ctx, "input-queue")
-
-    // Create output channel
-    outputMessages := make(chan *gopipe.Message[OutputMessage], 10)
-
-    // Start publisher
-    done, _ := publisher.Publish(ctx, "output-queue", outputMessages)
-
-    // Process messages
-    go func() {
-        for msg := range inputMessages {
-            // Transform message
-            output := OutputMessage{
-                ID:        msg.Payload.ID,
-                Processed: fmt.Sprintf("Processed: %s", msg.Payload.Text),
-            }
-
-            // Forward with same acknowledgment
-            outMsg := gopipe.NewMessage(
-                msg.Metadata,
-                output,
-                msg.Deadline(),
-                msg.Ack,
-                msg.Nack,
-            )
-
-            outputMessages <- outMsg
-        }
-        close(outputMessages)
-    }()
-
-    <-done
-}
+msg.Properties().Set("message_id", "abc123")
+msg.Properties().Set("custom_field", "value")
 ```
 
 ## Architecture
 
 This library follows the adapter pattern to integrate Azure Service Bus with gopipe:
 
-- **Subscriber**: Pulls messages from Service Bus and converts them to `gopipe.Message[T]`
-- **Publisher**: Accepts `gopipe.Message[T]` from a channel and publishes to Service Bus
-- **Message Mapping**: Handles conversion between gopipe and Service Bus message formats
-- **Concurrency**: Uses semaphores for controlled concurrent processing
-- **Thread Safety**: Double-checked locking for sender/receiver management
+```
+gopipe Pipeline → Publisher → Azure Service Bus → Subscriber → gopipe Pipeline
+```
 
-## Requirements
+### Key Components
 
-- Go 1.21 or later
-- Azure Service Bus namespace
-- [gopipe](https://github.com/fxsml/gopipe) framework
-- [Azure SDK for Go](https://github.com/Azure/azure-sdk-for-go)
+- **Client**: Manages connection to Azure Service Bus
+- **Publisher**: Implements gopipe publisher interface for sending messages
+- **Message Transform**: Converts between gopipe and Azure Service Bus message formats
+- **Batch Processing**: Groups messages for efficient sending
 
-## License
+## Development Commands
 
-See LICENSE file for details.
+```bash
+# Format code
+make fmt
+
+# Run linter
+make lint
+
+# Run go vet
+make vet
+
+# Tidy modules
+make tidy
+
+# Build
+make build
+
+# Clean up
+make clean
+```
+
+## Known Issues
+
+### macOS Emulator DNS Issues
+
+The Azure Service Bus emulator may experience DNS resolution issues on macOS, particularly with Apple Silicon. The emulator may show as "unhealthy" but still function correctly. See [EMULATOR.md](EMULATOR.md) for workarounds.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests: `make test`
+5. Submit a pull request
+
+## License
+
+See [LICENSE](LICENSE) file for details.
+
+## Resources
+
+- [gopipe Framework](https://github.com/fxsml/gopipe)
+- [Azure Service Bus Documentation](https://learn.microsoft.com/en-us/azure/service-bus-messaging/)
+- [Azure SDK for Go](https://github.com/Azure/azure-sdk-for-go)

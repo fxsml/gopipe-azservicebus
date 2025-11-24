@@ -78,6 +78,10 @@ func (c *PublisherConfig) setDefaults() {
 	if c.BatchMaxSize <= 0 {
 		c.BatchMaxSize = 1
 	}
+	if c.BatchMaxDuration <= 0 {
+		// Use 1ms as minimum to avoid panic in NewTicker
+		c.BatchMaxDuration = 1 * time.Millisecond
+	}
 	if c.MarshalFunc == nil {
 		c.MarshalFunc = json.Marshal
 	}
@@ -204,7 +208,7 @@ func (p *Publisher) transformMessage(_ context.Context, msg *gopipe.Message[any]
 		}
 		return true
 	})
-	return nil, nil
+	return sbMsg, nil
 }
 
 func (p *Publisher) publishMessageBatch(sender *azservicebus.Sender) func(ctx context.Context, i []*azservicebus.Message) ([]struct{}, error) {

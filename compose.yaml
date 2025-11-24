@@ -1,23 +1,58 @@
 services:
-  emulator:
-    container_name: "servicebus-emulator"
+  servicebus:
     image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
-    volumes:
-      - "${SERVICEBUS_EMULATOR_CONFIG_PATH:-./emulator-config.json}:/ServiceBus_Emulator/ConfigFiles/Config.json"
-    ports:
-      - "5672:5672"
-      - "5300:5300"
-    environment:
-      SQL_SERVER: mssql
-      MSSQL_SA_PASSWORD: "${SERVICEBUS_EMULATOR_MSSQL_SA_PASSWORD:-YourStrong@Passw0rd}"
-      ACCEPT_EULA: "Y"
-      SQL_WAIT_INTERVAL: ${SERVICEBUS_EMULATOR_SQL_WAIT_INTERVAL:-15}
+    container_name: servicebus-emulator
+    platform: linux/amd64 # Emulator is x64 only (works on Apple Silicon via Rosetta)
     depends_on:
-      - mssql
-
-  mssql:
-    container_name: "mssql"
-    image: "mcr.microsoft.com/mssql/server:2022-latest"
+      sql:
+        condition: service_healthy
     environment:
-      ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "${SERVICEBUS_EMULATOR_MSSQL_SA_PASSWORD:-YourStrong@Passw0rd}"
+      - ACCEPT_EULA=Y
+      - ASPNETCORE_URLS=http://0.0.0.0:5678
+      - ServiceBus__ConfigPath=/app/config
+      - ServiceBus__SqlConnectionString=Server=sql,1433;Database=master;User Id=sa;Password=Your_password123!;TrustServerCertificate=true;Encrypt=false
+      - ServiceBus__EnableMessageBrowser=true
+    ports:
+      - "5678:5678"  # HTTP endpoint
+      - "5671:5671"  # AMQP over TLS
+      - "5672:5672"  # AMQP
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - servicebus-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5678"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  sql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: servicebus-sql
+    platform: linux/arm64  # Use ARM64 for Apple Silicon (x64 on Intel Macs)
+    environment:
+      - ACCEPT_EULA=1
+      - MSSQL_SA_PASSWORD=Your_password123!
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    networks:
+      - servicebus-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sqlservr > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 40s
+    volumes:
+      - sql-data:/var/opt/mssql
+
+networks:
+  servicebus-network:
+    driver: bridge
+
+volumes:
+  sql-data:
