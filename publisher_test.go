@@ -44,14 +44,20 @@ func TestPublisher_EndToEnd(t *testing.T) {
 	messageCount := 5
 	messages := make([]*message.Message, 0, messageCount)
 	for i := 1; i <= messageCount; i++ {
-		msg := &message.Message{
-			Payload: map[string]any{
+		props := &message.Properties{}
+		props.Set("test_run", t.Name())
+		props.Set("message_index", fmt.Sprintf("%d", i))
+
+		msg := message.NewMessage(
+			props,
+			map[string]any{
 				"id":      i,
 				"content": fmt.Sprintf("Test message #%d", i),
 			},
-		}
-		msg.Properties().Set("test_run", t.Name())
-		msg.Properties().Set("message_index", fmt.Sprintf("%d", i))
+			time.Time{},
+			nil,
+			nil,
+		)
 		messages = append(messages, msg)
 	}
 
@@ -144,12 +150,18 @@ func TestPublisher_WithTopic(t *testing.T) {
 	defer publisher.Close()
 
 	// Publish test message to topic
-	msg := &message.Message{
-		Payload: map[string]any{
+	props := &message.Properties{}
+	props.Set("test_run", t.Name())
+
+	msg := message.NewMessage(
+		props,
+		map[string]any{
 			"message": "Hello from topic test!",
 		},
-	}
-	msg.Properties().Set("test_run", t.Name())
+		time.Time{},
+		nil,
+		nil,
+	)
 
 	msgChan := channel.FromValues(msg)
 	done, err := publisher.Publish(topicName, msgChan)
@@ -311,15 +323,21 @@ func TestPublisher_MessageMetadata(t *testing.T) {
 	defer publisher.Close()
 
 	// Create message with metadata
-	msg := &message.Message{
-		Payload: map[string]string{"data": "test"},
-	}
+	props := &message.Properties{}
 	messageID := "test-msg-123"
-	msg.Properties().Set("message_id", messageID)
-	msg.Properties().Set("subject", "test-subject")
-	msg.Properties().Set("content_type", "application/json")
-	msg.Properties().Set("correlation_id", "corr-123")
-	msg.Properties().Set("custom_prop", "custom_value")
+	props.Set("message_id", messageID)
+	props.Set("subject", "test-subject")
+	props.Set("content_type", "application/json")
+	props.Set("correlation_id", "corr-123")
+	props.Set("custom_prop", "custom_value")
+
+	msg := message.NewMessage(
+		props,
+		map[string]string{"data": "test"},
+		time.Time{},
+		nil,
+		nil,
+	)
 
 	msgChan := channel.FromValues(msg)
 	done, err := publisher.Publish(queueName, msgChan)

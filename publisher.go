@@ -190,19 +190,26 @@ func (p *Publisher) transformMessage(_ context.Context, msg *message.Message) (*
 
 		switch key {
 		case "message_id":
-			sbMsg.MessageID = &strValue
+			v := strValue
+			sbMsg.MessageID = &v
 		case "subject":
-			sbMsg.Subject = &strValue
+			v := strValue
+			sbMsg.Subject = &v
 		case "correlation_id":
-			sbMsg.CorrelationID = &strValue
+			v := strValue
+			sbMsg.CorrelationID = &v
 		case "content_type":
-			sbMsg.ContentType = &strValue
+			v := strValue
+			sbMsg.ContentType = &v
 		case "to":
-			sbMsg.To = &strValue
+			v := strValue
+			sbMsg.To = &v
 		case "reply_to":
-			sbMsg.ReplyTo = &strValue
+			v := strValue
+			sbMsg.ReplyTo = &v
 		case "session_id":
-			sbMsg.SessionID = &strValue
+			v := strValue
+			sbMsg.SessionID = &v
 		default:
 			// All other metadata goes to application properties
 			sbMsg.ApplicationProperties[key] = value

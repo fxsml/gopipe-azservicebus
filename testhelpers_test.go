@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,7 @@ func (h *TestHelper) CreateQueue(ctx context.Context, queueName string) {
 }
 
 // CreateTopic creates a test topic and registers it for cleanup
+// Skips the test if the namespace is using Basic tier (which doesn't support topics)
 func (h *TestHelper) CreateTopic(ctx context.Context, topicName string) {
 	h.t.Helper()
 	h.t.Logf("Creating topic: %s", topicName)
@@ -81,6 +83,10 @@ func (h *TestHelper) CreateTopic(ctx context.Context, topicName string) {
 	// Create topic with default settings
 	_, err := h.adminClient.CreateTopic(ctx, topicName, nil)
 	if err != nil {
+		// Check if this is a Basic tier error (topics not supported)
+		if isBasicTierError(err) {
+			h.t.Skip("Skipping test: Topics are not supported on Basic tier Azure Service Bus namespace")
+		}
 		h.t.Fatalf("Failed to create topic %s: %v", topicName, err)
 	}
 
@@ -173,4 +179,14 @@ func GenerateTestName(t *testing.T, prefix string) string {
 	// Use timestamp to make it unique
 	timestamp := time.Now().Unix()
 	return fmt.Sprintf("%s-%d", prefix, timestamp)
+}
+
+// isBasicTierError checks if the error is due to Basic tier limitations
+func isBasicTierError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errorStr := err.Error()
+	return strings.Contains(errorStr, "Basic' tier") ||
+		strings.Contains(errorStr, "Cannot operate on type Topic")
 }
