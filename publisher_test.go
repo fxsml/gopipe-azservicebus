@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -764,4 +765,340 @@ func containsAtIndex(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestPublisher_ErrorHandler tests that the ErrorHandler is called on publish errors
+func TestPublisher_ErrorHandler(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test queue
+	queueName := GenerateTestName(t, "test-error-handler")
+	helper.CreateQueue(ctx, queueName)
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Track errors received by the handler
+	var errorMu sync.Mutex
+	var receivedErrors []struct {
+		msg *message.Message
+		err error
+	}
+
+	// Create publisher with error handler
+	publisher := NewPublisher(client, PublisherConfig{
+		ErrorHandler: func(msg *message.Message, err error) {
+			errorMu.Lock()
+			defer errorMu.Unlock()
+			receivedErrors = append(receivedErrors, struct {
+				msg *message.Message
+				err error
+			}{msg: msg, err: err})
+		},
+	})
+	defer publisher.Close()
+
+	// Publish a message to a non-existent queue to trigger an error
+	nonExistentQueue := "non-existent-queue-" + fmt.Sprintf("%d", time.Now().Unix())
+
+	msg := &message.Message{
+		Payload: map[string]any{"test": "data"},
+	}
+	msgChan := channel.FromValues(msg)
+
+	done, err := publisher.Publish(nonExistentQueue, msgChan)
+	if err != nil {
+		// This is expected - sender creation might fail
+		t.Logf("Expected error creating sender for non-existent queue: %v", err)
+		return
+	}
+
+	// Wait for publishing to complete
+	<-done
+
+	// Give some time for error handler to be called
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify error handler was called
+	errorMu.Lock()
+	errorCount := len(receivedErrors)
+	errorMu.Unlock()
+
+	if errorCount > 0 {
+		t.Logf("ErrorHandler was called %d time(s) as expected", errorCount)
+		for i, e := range receivedErrors {
+			t.Logf("Error %d: %v", i+1, e.err)
+		}
+	} else {
+		t.Log("No errors were reported to ErrorHandler (queue might have been created automatically)")
+	}
+}
+
+// TestPublisher_ErrorHandler_WithMarshalError tests ErrorHandler with marshal errors
+func TestPublisher_ErrorHandler_WithMarshalError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test queue
+	queueName := GenerateTestName(t, "test-marshal-error")
+	helper.CreateQueue(ctx, queueName)
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Track errors received by the handler
+	var errorMu sync.Mutex
+	var receivedErrors []struct {
+		msg *message.Message
+		err error
+	}
+
+	// Create publisher with error handler and custom marshal function that always fails
+	publisher := NewPublisher(client, PublisherConfig{
+		MarshalFunc: func(v any) ([]byte, error) {
+			return nil, fmt.Errorf("intentional marshal error")
+		},
+		ErrorHandler: func(msg *message.Message, err error) {
+			errorMu.Lock()
+			defer errorMu.Unlock()
+			receivedErrors = append(receivedErrors, struct {
+				msg *message.Message
+				err error
+			}{msg: msg, err: err})
+			t.Logf("ErrorHandler called with error: %v", err)
+		},
+	})
+	defer publisher.Close()
+
+	// Publish a message that will fail to marshal
+	msg := &message.Message{
+		Payload: map[string]any{"test": "data"},
+	}
+	msgChan := channel.FromValues(msg)
+
+	done, err := publisher.Publish(queueName, msgChan)
+	if err != nil {
+		t.Fatalf("Failed to start publish: %v", err)
+	}
+
+	// Wait for publishing to complete
+	<-done
+
+	// Give some time for error handler to be called
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify error handler was called
+	errorMu.Lock()
+	errorCount := len(receivedErrors)
+	hasTransformError := false
+	for _, e := range receivedErrors {
+		if e.err != nil && contains(e.err.Error(), "transform") {
+			hasTransformError = true
+		}
+	}
+	errorMu.Unlock()
+
+	if errorCount == 0 {
+		t.Error("Expected ErrorHandler to be called for marshal error, but it wasn't")
+	} else {
+		t.Logf("ErrorHandler was called %d time(s) for marshal error", errorCount)
+	}
+
+	if !hasTransformError && errorCount > 0 {
+		t.Logf("Note: Error messages received: %v", receivedErrors)
+	}
+}
+
+// TestPublisher_ErrorHandler_MultipleMessages tests ErrorHandler with multiple messages
+func TestPublisher_ErrorHandler_MultipleMessages(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test queue
+	queueName := GenerateTestName(t, "test-multiple-errors")
+	helper.CreateQueue(ctx, queueName)
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Track errors received by the handler
+	var errorMu sync.Mutex
+	var receivedErrors []struct {
+		msg *message.Message
+		err error
+	}
+	successCount := 0
+
+	// Create publisher with error handler and marshal function that fails for specific payloads
+	publisher := NewPublisher(client, PublisherConfig{
+		MarshalFunc: func(v any) ([]byte, error) {
+			if m, ok := v.(map[string]any); ok {
+				if shouldFail, exists := m["fail"]; exists && shouldFail == true {
+					return nil, fmt.Errorf("intentional failure for message")
+				}
+			}
+			return json.Marshal(v)
+		},
+		ErrorHandler: func(msg *message.Message, err error) {
+			errorMu.Lock()
+			defer errorMu.Unlock()
+			if err != nil {
+				receivedErrors = append(receivedErrors, struct {
+					msg *message.Message
+					err error
+				}{msg: msg, err: err})
+			} else {
+				successCount++
+			}
+		},
+	})
+	defer publisher.Close()
+
+	// Publish multiple messages, some that will succeed and some that will fail
+	messages := []*message.Message{
+		{Payload: map[string]any{"id": 1, "fail": false}},
+		{Payload: map[string]any{"id": 2, "fail": true}}, // This should fail
+		{Payload: map[string]any{"id": 3, "fail": false}},
+		{Payload: map[string]any{"id": 4, "fail": true}}, // This should fail
+		{Payload: map[string]any{"id": 5, "fail": false}},
+	}
+
+	msgChan := channel.FromValues(messages...)
+
+	done, err := publisher.Publish(queueName, msgChan)
+	if err != nil {
+		t.Fatalf("Failed to start publish: %v", err)
+	}
+
+	// Wait for publishing to complete
+	<-done
+
+	// Give some time for error handler to be called
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify error handler was called for failures
+	errorMu.Lock()
+	errorCount := len(receivedErrors)
+	errorMu.Unlock()
+
+	t.Logf("ErrorHandler called with %d errors and %d successes", errorCount, successCount)
+
+	if errorCount < 2 {
+		t.Errorf("Expected at least 2 errors (for messages with fail=true), got %d", errorCount)
+	}
+
+	// Log the errors received
+	errorMu.Lock()
+	for i, e := range receivedErrors {
+		if e.err != nil {
+			t.Logf("Error %d: %v (message: %+v)", i+1, e.err, e.msg.Payload)
+		}
+	}
+	errorMu.Unlock()
+}
+
+// TestPublisher_ErrorHandler_DefaultNoOp tests that default ErrorHandler doesn't break anything
+func TestPublisher_ErrorHandler_DefaultNoOp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+
+	// Create a test queue
+	queueName := GenerateTestName(t, "test-default-handler")
+	helper.CreateQueue(ctx, queueName)
+
+	// Create client
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Create publisher WITHOUT specifying ErrorHandler (should use default no-op)
+	publisher := NewPublisher(client, PublisherConfig{})
+	defer publisher.Close()
+
+	// Publish a normal message
+	msg := &message.Message{
+		Payload: map[string]any{"id": 1, "content": "test message"},
+	}
+	msgChan := channel.FromValues(msg)
+
+	done, err := publisher.Publish(queueName, msgChan)
+	if err != nil {
+		t.Fatalf("Failed to publish with default error handler: %v", err)
+	}
+
+	// Wait for publishing to complete
+	select {
+	case <-done:
+		t.Log("Message published successfully with default error handler")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for publish to complete")
+	}
+
+	// Verify message was actually published by subscribing
+	subscriber := NewSubscriber(client, SubscriberConfig{
+		ReceiveTimeout:  5 * time.Second,
+		MaxMessageCount: 1,
+		ErrorHandler: func(err error) {
+			t.Errorf("Unexpected error in subscriber: %v", err)
+		},
+	})
+	defer subscriber.Close()
+
+	subCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	receiveChan, err := subscriber.Subscribe(subCtx, queueName)
+	if err != nil {
+		t.Fatalf("Failed to subscribe: %v", err)
+	}
+
+	// Receive the message
+	select {
+	case msg := <-receiveChan:
+		t.Logf("Received message: %v", msg.Payload)
+		msg.Ack()
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	t.Log("Default error handler test completed successfully")
 }

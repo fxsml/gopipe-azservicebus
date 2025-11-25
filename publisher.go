@@ -265,15 +265,20 @@ func (p *Publisher) publishMessageBatch(queueOrTopic string) func(ctx context.Co
 		// Prepare result slice
 		results := make([]batchResult, 0, len(i))
 
-		// Convert to azservicebus.Messages
-		sbMessages := make([]*azservicebus.Message, len(i))
-		for idx, msg := range i {
+		// Convert to azservicebus.Messages, filtering out failed transformations
+		sbMessages := make([]*azservicebus.Message, 0, len(i))
+		for _, msg := range i {
 			sbMsg, err := p.transformMessage(msg)
 			if err != nil {
 				results = append(results, batchResult{msg: msg, err: fmt.Errorf("failed to transform message: %w", err)})
 				continue
 			}
-			sbMessages[idx] = sbMsg
+			sbMessages = append(sbMessages, sbMsg)
+		}
+
+		// If all messages failed to transform, return early with errors
+		if len(sbMessages) == 0 {
+			return results, nil
 		}
 
 		// Attempt to send message batch
