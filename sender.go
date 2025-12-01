@@ -170,27 +170,38 @@ func (s *Sender) transformMessage(msg *message.Message[[]byte]) *azservicebus.Me
 		}
 
 		switch key {
-		case "message_id":
+		case message.PropID:
 			v := strValue
 			sbMsg.MessageID = &v
-		case "subject":
-			v := strValue
-			sbMsg.Subject = &v
-		case "correlation_id":
+		case message.PropCorrelationID:
 			v := strValue
 			sbMsg.CorrelationID = &v
-		case "content_type":
+		case message.PropCreatedAt:
+			// read-only property, ignore
+		case message.PropRetryCount:
+			// read-only property, ignore
+		case message.PropDeadline:
+			// read-only property, ignore
+		case message.PropSequenceNumber:
+			// read-only property, ignore
+		case message.PropPartitionKey:
+			// read-only property, ignore
+		case message.PropPartitionOffset:
+			// read-only property, ignore
+		case message.PropTTL:
+			if value, ok := value.(time.Duration); ok {
+				sbMsg.TimeToLive = &value
+			}
+		case message.PropSubject:
+			v := strValue
+			sbMsg.Subject = &v
+		case message.PropContentType:
 			v := strValue
 			sbMsg.ContentType = &v
-		case "to":
-			v := strValue
-			sbMsg.To = &v
-		case "reply_to":
+		case message.PropReplyTo:
 			v := strValue
 			sbMsg.ReplyTo = &v
-		case "session_id":
-			v := strValue
-			sbMsg.SessionID = &v
+
 		default:
 			// All other metadata goes to application properties
 			sbMsg.ApplicationProperties[key] = value
