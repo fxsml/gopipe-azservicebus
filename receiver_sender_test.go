@@ -34,7 +34,7 @@ func TestSenderAndReceiver_EndToEnd(t *testing.T) {
 
 	// Create sender
 	sender := NewSender(client, SenderConfig{
-		SendTimeout:  30 * time.Second,
+		SendTimeout: 30 * time.Second,
 	})
 	defer sender.Close()
 
@@ -42,9 +42,6 @@ func TestSenderAndReceiver_EndToEnd(t *testing.T) {
 	receiver := NewReceiver(client, ReceiverConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 5,
-		ErrorHandler: func(err error) {
-			t.Errorf("Unexpected error in receiver: %v", err)
-		},
 	})
 	defer receiver.Close()
 
@@ -214,9 +211,6 @@ func TestReceiver_MessageMetadata(t *testing.T) {
 	receiver := NewReceiver(client, ReceiverConfig{
 		ReceiveTimeout:  5 * time.Second,
 		MaxMessageCount: 1,
-		ErrorHandler: func(err error) {
-			t.Errorf("Unexpected error in receiver: %v", err)
-		},
 	})
 	defer receiver.Close()
 
@@ -393,11 +387,7 @@ func TestReceiver_ClosedReceiverReturnsError(t *testing.T) {
 	}
 	defer client.Close(ctx)
 
-	receiver := NewReceiver(client, ReceiverConfig{
-		ErrorHandler: func(err error) {
-			t.Errorf("Unexpected error in receiver: %v", err)
-		},
-	})
+	receiver := NewReceiver(client, ReceiverConfig{})
 
 	// Close the receiver
 	if err := receiver.Close(); err != nil {

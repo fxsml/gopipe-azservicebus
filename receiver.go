@@ -2,7 +2,6 @@ package azservicebus
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,6 +28,10 @@ type ReceiverConfig struct {
 	// Default: 30 seconds
 	ReceiveTimeout time.Duration
 
+	// AckTimeout is the timeout for acknowledging messages
+	// Default: 30 seconds
+	AckTimeout time.Duration
+
 	// CloseTimeout is the timeout for closing receivers during shutdown
 	// Default: 30 seconds
 	CloseTimeout time.Duration
@@ -36,14 +39,6 @@ type ReceiverConfig struct {
 	// MaxMessageCount is the maximum number of messages to receive in a single batch
 	// Default: 10
 	MaxMessageCount int
-
-	// UnmarshalFunc is a function to unmarshal the message payload
-	// Default: json.Unmarshal
-	UnmarshalFunc func([]byte, any) error
-
-	// ErrorHandler is called when an error occurs during message processing
-	// Default: no-op (errors are silently ignored)
-	ErrorHandler func(error)
 }
 
 // setDefaults sets default values for ReceiverConfig
@@ -57,11 +52,8 @@ func (c *ReceiverConfig) setDefaults() {
 	if c.MaxMessageCount <= 0 {
 		c.MaxMessageCount = 10
 	}
-	if c.UnmarshalFunc == nil {
-		c.UnmarshalFunc = json.Unmarshal
-	}
-	if c.ErrorHandler == nil {
-		c.ErrorHandler = func(err error) {}
+	if c.AckTimeout <= 0 {
+		c.AckTimeout = 30 * time.Second
 	}
 }
 
@@ -121,10 +113,7 @@ func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message
 			// Recreate the receiver and retry
 			newReceiver, recreateErr := r.recreateReceiver(queueOrTopic)
 			if recreateErr != nil {
-				// For recreation errors, call error handler and return
-				receiveErr := fmt.Errorf("failed to recreate receiver after connection loss: %w", recreateErr)
-				r.config.ErrorHandler(receiveErr)
-				return nil, receiveErr
+				return nil, fmt.Errorf("failed to recreate receiver after connection loss: %w", recreateErr)
 			}
 
 			// Retry receiving with new receiver
@@ -134,15 +123,10 @@ func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message
 				if errors.Is(err, context.Canceled) {
 					return []*message.Message[[]byte]{}, nil
 				}
-				receiveErr := fmt.Errorf("failed to receive messages after recreating receiver: %w", err)
-				r.config.ErrorHandler(receiveErr)
-				return nil, receiveErr
+				return nil, fmt.Errorf("failed to receive messages after recreating receiver: %w", err)
 			}
 		} else {
-			// For other errors, call error handler and return the error
-			receiveErr := fmt.Errorf("failed to receive messages: %w", err)
-			r.config.ErrorHandler(receiveErr)
-			return nil, receiveErr
+			return nil, fmt.Errorf("failed to receive messages: %w", err)
 		}
 	}
 
@@ -293,6 +277,9 @@ func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *az
 	}
 	if sbMsg.SessionID != nil {
 		propsMap["session_id"] = *sbMsg.SessionID
+	}
+	if sbMsg.LockedUntil != nil {
+		propsMap["deadline"] = *sbMsg.LockedUntil
 	}
 
 	// Map application properties

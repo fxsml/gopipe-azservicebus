@@ -7,7 +7,7 @@ toolchain go1.24.10
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.11.0
 	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0
-	github.com/fxsml/gopipe v0.0.0
+	github.com/fxsml/gopipe v0.9.0
 	github.com/joho/godotenv v1.5.1
 )
 
@@ -25,5 +25,3 @@ require (
 	golang.org/x/sys v0.34.0 // indirect
 	golang.org/x/text v0.27.0 // indirect
 )
-
-replace github.com/fxsml/gopipe => ../gopipe

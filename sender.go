@@ -2,7 +2,6 @@ package azservicebus
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -31,14 +30,6 @@ type SenderConfig struct {
 	// CloseTimeout is the timeout for closing senders during shutdown
 	// Default: 30 seconds
 	CloseTimeout time.Duration
-
-	// MarshalFunc is a function to marshal the message payload
-	// Default: json.Marshal
-	MarshalFunc func(any) ([]byte, error)
-
-	// ErrorHandler is an optional function to handle message send errors
-	// Default: no-op
-	ErrorHandler func(*message.Message[[]byte], error)
 }
 
 // setDefaults sets default values for SenderConfig
@@ -48,12 +39,6 @@ func (c *SenderConfig) setDefaults() {
 	}
 	if c.CloseTimeout <= 0 {
 		c.CloseTimeout = 30 * time.Second
-	}
-	if c.MarshalFunc == nil {
-		c.MarshalFunc = json.Marshal
-	}
-	if c.ErrorHandler == nil {
-		c.ErrorHandler = func(*message.Message[[]byte], error) {}
 	}
 }
 
@@ -101,12 +86,7 @@ func (s *Sender) Send(ctx context.Context, queueOrTopic string, msgs []*message.
 	// Convert to azservicebus.Messages, filtering out failed transformations
 	sbMessages := make([]*azservicebus.Message, 0, len(msgs))
 	for _, msg := range msgs {
-		sbMsg, err := s.transformMessage(msg)
-		if err != nil {
-			transformErr := fmt.Errorf("failed to transform message: %w", err)
-			s.config.ErrorHandler(msg, transformErr)
-			continue
-		}
+		sbMsg := s.transformMessage(msg)
 		sbMessages = append(sbMessages, sbMsg)
 	}
 
@@ -171,7 +151,7 @@ func (s *Sender) getOrCreateSender(queueOrTopic string) (*azservicebus.Sender, e
 }
 
 // transformMessage transforms a gopipe Message to an Azure Service Bus Message
-func (s *Sender) transformMessage(msg *message.Message[[]byte]) (*azservicebus.Message, error) {
+func (s *Sender) transformMessage(msg *message.Message[[]byte]) *azservicebus.Message {
 	// Use payload directly as body (it's already []byte)
 	body := msg.Payload()
 
@@ -217,7 +197,7 @@ func (s *Sender) transformMessage(msg *message.Message[[]byte]) (*azservicebus.M
 		}
 		return true
 	})
-	return sbMsg, nil
+	return sbMsg
 }
 
 // attemptSendBatch attempts to send a batch of messages with the given sender
