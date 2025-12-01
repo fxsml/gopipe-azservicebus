@@ -300,7 +300,13 @@ func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *az
 	nack := func(err error) {
 		nackCtx, cancel := context.WithTimeout(context.Background(), r.config.CloseTimeout)
 		defer cancel()
-		if err := sbReceiver.AbandonMessage(nackCtx, sbMsg, nil); err != nil {
+		opts := &azservicebus.AbandonMessageOptions{}
+		if err != nil {
+			opts.PropertiesToModify = map[string]any{
+				"abandon_error": err.Error(),
+			}
+		}
+		if err := sbReceiver.AbandonMessage(nackCtx, sbMsg, opts); err != nil {
 			// Log error but don't fail
 			fmt.Printf("ERROR: failed to abandon message: %v\n", err)
 		}
