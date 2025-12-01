@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 
 	azservicebus "github.com/fxsml/gopipe-azservicebus"
-	"github.com/fxsml/gopipe/channel"
 	"github.com/fxsml/gopipe/message"
 )
 
@@ -20,21 +22,32 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	publisher := azservicebus.NewPublisher(client, azservicebus.PublisherConfig{})
-	defer publisher.Close()
+	defer client.Close(context.Background())
 
-	msg := &message.Message{
-		Payload: Article{
-			ID:   1,
-			Name: "Example",
-		},
+	// Create sender
+	sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+	defer sender.Close()
+
+	// Create message payload
+	article := Article{
+		ID:   1,
+		Name: "Example",
 	}
 
-	done, err := publisher.Publish("your-topic-name", channel.FromValues(msg))
+	// Marshal to JSON
+	body, err := json.Marshal(article)
 	if err != nil {
 		panic(err)
 	}
 
-	// Wait for publishing to complete
-	<-done
+	// Create message
+	msg := message.New(body)
+
+	// Send message
+	err = sender.Send(context.Background(), "your-topic-name", []*message.Message[[]byte]{msg})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Message sent successfully!")
 }
