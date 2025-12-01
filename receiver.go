@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,7 +149,7 @@ func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message
 	// Transform Azure Service Bus messages to gopipe messages
 	result := make([]*message.Message[[]byte], 0, len(messages))
 	for _, sbMsg := range messages {
-		msg, err := r.transformMessage(ctx, sbReceiver, sbMsg)
+		msg, err := r.transformMessage(sbReceiver, sbMsg)
 		if err != nil {
 			return nil, err
 		}
@@ -182,10 +183,11 @@ func (r *Receiver) getOrCreateReceiver(queueOrTopic string) (*azservicebus.Recei
 	var err error
 
 	// Check if input contains "/" to determine if it's a topic/subscription or queue
-	if idx := indexOf(queueOrTopic, "/"); idx >= 0 {
+	parts := strings.Split(queueOrTopic, "/")
+	if len(parts) == 2 {
 		// Topic subscription format: "topic/subscription"
-		topicName := queueOrTopic[:idx]
-		subscriptionName := queueOrTopic[idx+1:]
+		topicName := parts[0]
+		subscriptionName := parts[1]
 		sbReceiver, err = r.client.NewReceiverForSubscription(topicName, subscriptionName, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create receiver for topic %s subscription %s: %w", topicName, subscriptionName, err)
@@ -239,10 +241,11 @@ func (r *Receiver) recreateReceiver(queueOrTopic string) (*azservicebus.Receiver
 	var newSbReceiver *azservicebus.Receiver
 	var err error
 
-	if idx := indexOf(queueOrTopic, "/"); idx >= 0 {
+	parts := strings.Split(queueOrTopic, "/")
+	if len(parts) == 2 {
 		// Topic subscription format: "topic/subscription"
-		topicName := queueOrTopic[:idx]
-		subscriptionName := queueOrTopic[idx+1:]
+		topicName := parts[0]
+		subscriptionName := parts[1]
 		newSbReceiver, err = r.client.NewReceiverForSubscription(topicName, subscriptionName, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to recreate receiver for topic %s subscription %s: %w", topicName, subscriptionName, err)
@@ -262,7 +265,7 @@ func (r *Receiver) recreateReceiver(queueOrTopic string) (*azservicebus.Receiver
 }
 
 // transformMessage transforms an Azure Service Bus ReceivedMessage to a gopipe Message
-func (r *Receiver) transformMessage(ctx context.Context, sbReceiver *azservicebus.Receiver, sbMsg *azservicebus.ReceivedMessage) (*message.Message[[]byte], error) {
+func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *azservicebus.ReceivedMessage) (*message.Message[[]byte], error) {
 	// Use raw bytes as payload
 	payload := sbMsg.Body
 
@@ -328,17 +331,6 @@ func (r *Receiver) transformMessage(ctx context.Context, sbReceiver *azservicebu
 
 	// Create gopipe message with payload and options
 	return message.New(payload, opts...), nil
-}
-
-// indexOf returns the index of the first occurrence of the character in the string,
-// or -1 if not found
-func indexOf(s string, char string) int {
-	for i := range s {
-		if s[i] == char[0] {
-			return i
-		}
-	}
-	return -1
 }
 
 // Close gracefully shuts down the receiver
