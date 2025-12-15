@@ -12,7 +12,11 @@ import (
 	"github.com/fxsml/gopipe/message"
 )
 
-// Receiver receives messages from Azure Service Bus queues and topics
+// Ensure Receiver implements message.Receiver interface
+var _ message.Receiver = (*Receiver)(nil)
+
+// Receiver receives messages from Azure Service Bus queues and topics.
+// It implements the message.Receiver interface from gopipe.
 type Receiver struct {
 	client      *azservicebus.Client
 	config      ReceiverConfig
@@ -69,9 +73,10 @@ func NewReceiver(client *azservicebus.Client, config ReceiverConfig) *Receiver {
 }
 
 // Receive receives a batch of messages from the specified Azure Service Bus queue or topic.
+// It implements the message.Receiver interface from gopipe.
 // It returns up to MaxMessageCount messages, or fewer if not enough messages are available.
 //
-// The queueOrTopic parameter should be:
+// The topic parameter should be:
 //   - A queue name for queue subscriptions (e.g., "my-queue")
 //   - A topic/subscription path for topic subscriptions (e.g., "my-topic/my-subscription")
 //
@@ -80,11 +85,7 @@ func NewReceiver(client *azservicebus.Client, config ReceiverConfig) *Receiver {
 // The method includes resilience mechanisms:
 //   - Automatic receiver recreation on connection loss
 //   - Timeout handling for receive operations
-//   - Error handling and reporting via ErrorHandler
-//
-// Messages are automatically unmarshaled from JSON (or custom UnmarshalFunc).
-// Azure Service Bus message properties are mapped to message metadata.
-func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message.Message[[]byte], error) {
+func (r *Receiver) Receive(ctx context.Context, topic string) ([]*message.Message, error) {
 	// Check if receiver is closed
 	r.closeMu.RLock()
 	if r.closed {
@@ -94,7 +95,7 @@ func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message
 	r.closeMu.RUnlock()
 
 	// Get or create receiver for this queue/topic
-	sbReceiver, err := r.getOrCreateReceiver(queueOrTopic)
+	sbReceiver, err := r.getOrCreateReceiver(topic)
 	if err != nil {
 		return nil, err
 	}
@@ -104,14 +105,14 @@ func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message
 	if err != nil {
 		// If context was canceled, return empty result without error to stop gracefully
 		if errors.Is(err, context.Canceled) {
-			return []*message.Message[[]byte]{}, nil
+			return []*message.Message{}, nil
 		}
 
 		// Check if it's a connection lost or closed error (includes idle timeout)
 		var sbErr *azservicebus.Error
 		if errors.As(err, &sbErr) && (sbErr.Code == azservicebus.CodeConnectionLost || sbErr.Code == azservicebus.CodeClosed) {
 			// Recreate the receiver and retry
-			newReceiver, recreateErr := r.recreateReceiver(queueOrTopic)
+			newReceiver, recreateErr := r.recreateReceiver(topic)
 			if recreateErr != nil {
 				return nil, fmt.Errorf("failed to recreate receiver after connection loss: %w", recreateErr)
 			}
@@ -121,7 +122,7 @@ func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message
 			if err != nil {
 				// If context was canceled, return empty result without error
 				if errors.Is(err, context.Canceled) {
-					return []*message.Message[[]byte]{}, nil
+					return []*message.Message{}, nil
 				}
 				return nil, fmt.Errorf("failed to receive messages after recreating receiver: %w", err)
 			}
@@ -131,7 +132,7 @@ func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message
 	}
 
 	// Transform Azure Service Bus messages to gopipe messages
-	result := make([]*message.Message[[]byte], 0, len(messages))
+	result := make([]*message.Message, 0, len(messages))
 	for _, sbMsg := range messages {
 		msg := r.transformMessage(sbReceiver, sbMsg)
 		result = append(result, msg)
@@ -246,49 +247,51 @@ func (r *Receiver) recreateReceiver(queueOrTopic string) (*azservicebus.Receiver
 }
 
 // transformMessage transforms an Azure Service Bus ReceivedMessage to a gopipe Message
-func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *azservicebus.ReceivedMessage) *message.Message[[]byte] {
+func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *azservicebus.ReceivedMessage) *message.Message {
 	// Use raw bytes as payload
 	payload := sbMsg.Body
 
-	// Create properties map for Service Bus metadata
-	propsMap := make(map[string]any)
+	// Create attributes map for Service Bus metadata
+	attrs := make(message.Attributes)
 
-	// Map standard Service Bus properties to metadata
+	// Map standard Service Bus properties to attributes
 	if sbMsg.MessageID != "" {
-		propsMap[message.PropID] = sbMsg.MessageID
+		attrs[message.AttrID] = sbMsg.MessageID
 	}
 	if sbMsg.CorrelationID != nil {
-		propsMap[message.PropCorrelationID] = *sbMsg.CorrelationID
+		attrs[message.AttrCorrelationID] = *sbMsg.CorrelationID
 	}
 	if sbMsg.EnqueuedTime != nil {
-		propsMap[message.PropCreatedAt] = *sbMsg.EnqueuedTime
-	}
-	propsMap[message.PropRetryCount] = int(sbMsg.DeliveryCount)
-	if sbMsg.LockedUntil != nil {
-		propsMap[message.PropDeadline] = *sbMsg.LockedUntil
-	}
-	if sbMsg.SequenceNumber != nil {
-		propsMap[message.PropSequenceNumber] = *sbMsg.SequenceNumber
-	}
-	if sbMsg.PartitionKey != nil {
-		propsMap[message.PropPartitionKey] = *sbMsg.PartitionKey
-	}
-	if sbMsg.TimeToLive != nil {
-		propsMap[message.PropTTL] = *sbMsg.TimeToLive
+		attrs[message.AttrTime] = *sbMsg.EnqueuedTime
 	}
 	if sbMsg.Subject != nil {
-		propsMap[message.PropSubject] = *sbMsg.Subject
+		attrs[message.AttrSubject] = *sbMsg.Subject
 	}
 	if sbMsg.ContentType != nil {
-		propsMap[message.PropContentType] = *sbMsg.ContentType
+		attrs[message.AttrDataContentType] = *sbMsg.ContentType
+	}
+
+	// Map additional Service Bus properties
+	attrs["deliveryCount"] = int(sbMsg.DeliveryCount)
+	if sbMsg.LockedUntil != nil {
+		attrs["lockedUntil"] = *sbMsg.LockedUntil
+	}
+	if sbMsg.SequenceNumber != nil {
+		attrs["sequenceNumber"] = *sbMsg.SequenceNumber
+	}
+	if sbMsg.PartitionKey != nil {
+		attrs["partitionKey"] = *sbMsg.PartitionKey
+	}
+	if sbMsg.TimeToLive != nil {
+		attrs["ttl"] = *sbMsg.TimeToLive
 	}
 	if sbMsg.ReplyTo != nil {
-		propsMap[message.PropReplyTo] = *sbMsg.ReplyTo
+		attrs["replyTo"] = *sbMsg.ReplyTo
 	}
 
 	// Map application properties
 	for key, value := range sbMsg.ApplicationProperties {
-		propsMap[key] = value
+		attrs[key] = value
 	}
 
 	// Create ack/nack callbacks
@@ -316,18 +319,8 @@ func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *az
 		}
 	}
 
-	// Build options for the message
-	opts := []message.Option[[]byte]{
-		message.WithAcking[[]byte](ack, nack),
-	}
-
-	// Add properties if we have any
-	if len(propsMap) > 0 {
-		opts = append(opts, message.WithProperties[[]byte](propsMap))
-	}
-
-	// Create gopipe message with payload and options
-	return message.New(payload, opts...)
+	// Create gopipe message with payload, attributes, and ack callbacks
+	return message.NewWithAcking(payload, attrs, ack, nack)
 }
 
 // Close gracefully shuts down the receiver

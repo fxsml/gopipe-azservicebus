@@ -9,6 +9,10 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 )
 
+// Client is an alias for the Azure Service Bus client.
+// This allows examples and users to refer to the client type without importing the Azure SDK directly.
+type Client = azservicebus.Client
+
 // ClientConfig holds configuration options for creating an Azure Service Bus client
 type ClientConfig struct {
 	// MaxRetries is the maximum number of retry attempts for operations

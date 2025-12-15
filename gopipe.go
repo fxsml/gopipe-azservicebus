@@ -20,9 +20,9 @@ import (
 //	    // Process message
 //	    msg.Ack()
 //	}
-func NewMessageGenerator(receiver *Receiver, queueOrTopic string, opts ...gopipe.Option[struct{}, *message.Message[[]byte]]) gopipe.Generator[*message.Message[[]byte]] {
+func NewMessageGenerator(receiver *Receiver, queueOrTopic string, opts ...gopipe.Option[struct{}, *message.Message]) gopipe.Generator[*message.Message] {
 	return gopipe.NewGenerator(
-		func(ctx context.Context) ([]*message.Message[[]byte], error) {
+		func(ctx context.Context) ([]*message.Message, error) {
 			return receiver.Receive(ctx, queueOrTopic)
 		},
 		opts...,
@@ -40,9 +40,9 @@ func NewMessageGenerator(receiver *Receiver, queueOrTopic string, opts ...gopipe
 //	for range out {
 //	    // Each output indicates a batch was sent
 //	}
-func NewMessageSinkPipe(sender *Sender, queueOrTopic string, batchSize int, batchTimeout time.Duration, opts ...gopipe.Option[[]*message.Message[[]byte], struct{}]) gopipe.Pipe[*message.Message[[]byte], struct{}] {
+func NewMessageSinkPipe(sender *Sender, queueOrTopic string, batchSize int, batchTimeout time.Duration, opts ...gopipe.Option[[]*message.Message, struct{}]) gopipe.Pipe[*message.Message, struct{}] {
 	return gopipe.NewBatchPipe(
-		func(ctx context.Context, batch []*message.Message[[]byte]) ([]struct{}, error) {
+		func(ctx context.Context, batch []*message.Message) ([]struct{}, error) {
 			if err := sender.Send(ctx, queueOrTopic, batch); err != nil {
 				return nil, err
 			}
@@ -61,19 +61,19 @@ func NewMessageSinkPipe(sender *Sender, queueOrTopic string, batchSize int, batc
 //
 //	sender := NewSender(client, SenderConfig{})
 //	sink := NewMessageTransformSink(sender, "my-queue", 10, 100*time.Millisecond,
-//	    func(ctx context.Context, order Order) (*message.Message[[]byte], error) {
+//	    func(ctx context.Context, order Order) (*message.Message, error) {
 //	        body, err := json.Marshal(order)
 //	        if err != nil {
 //	            return nil, err
 //	        }
-//	        return message.New(body), nil
+//	        return message.New(body, nil), nil
 //	    })
 func NewMessageTransformSink[In any](
 	sender *Sender,
 	queueOrTopic string,
 	batchSize int,
 	batchTimeout time.Duration,
-	transform func(context.Context, In) (*message.Message[[]byte], error),
+	transform func(context.Context, In) (*message.Message, error),
 	opts ...gopipe.Option[In, struct{}],
 ) gopipe.Pipe[In, struct{}] {
 	// First transform, then batch and send
@@ -91,8 +91,8 @@ func NewMessageTransformSink[In any](
 
 // combinedPipe combines a transform pipe with a sink pipe
 type combinedPipe[In any] struct {
-	transform gopipe.Pipe[In, *message.Message[[]byte]]
-	sink      gopipe.Pipe[*message.Message[[]byte], struct{}]
+	transform gopipe.Pipe[In, *message.Message]
+	sink      gopipe.Pipe[*message.Message, struct{}]
 }
 
 func (p *combinedPipe[In]) Start(ctx context.Context, in <-chan In) <-chan struct{} {

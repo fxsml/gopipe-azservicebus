@@ -41,10 +41,10 @@ func main() {
 	}
 
 	// Create message
-	msg := message.New(body)
+	msg := message.New(body, nil)
 
 	// Send message
-	err = sender.Send(context.Background(), "your-topic-name", []*message.Message[[]byte]{msg})
+	err = sender.Send(context.Background(), "your-topic-name", []*message.Message{msg})
 	if err != nil {
 		panic(err)
 	}

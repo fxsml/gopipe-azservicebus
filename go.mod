@@ -7,7 +7,7 @@ toolchain go1.24.10
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.11.0
 	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0
-	github.com/fxsml/gopipe v0.9.2
+	github.com/fxsml/gopipe v0.10.0
 	github.com/joho/godotenv v1.5.1
 )
 

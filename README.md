@@ -2,10 +2,14 @@
 
 Azure Service Bus integration for the [gopipe](https://github.com/fxsml/gopipe) pipeline framework.
 
+> **Note:** This library requires **gopipe v0.10.0** or later which uses a CloudEvents-aligned message API.
+
 ## Features
 
-- **Sender**: Send messages to Azure Service Bus queues and topics
-- **Receiver**: Receive messages from Azure Service Bus queues and topic subscriptions
+- **Sender**: Send messages to Azure Service Bus queues and topics (implements `message.Sender`)
+- **Receiver**: Receive messages from Azure Service Bus queues and topic subscriptions (implements `message.Receiver`)
+- **Publisher**: Channel-based message publishing using gopipe's `message.NewPublisher`
+- **Subscriber**: Channel-based message subscription using gopipe's `message.NewSubscriber`
 - **gopipe Integration**: Helper functions for seamless integration with gopipe pipelines
 - **Message Mapping**: Automatic conversion between gopipe messages and Azure Service Bus messages
 - **Reliability**: Connection recovery, message acknowledgment, retry support
@@ -44,12 +48,14 @@ func main() {
     sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
     defer sender.Close()
 
-    // Create message
+    // Create message with attributes
     body, _ := json.Marshal(map[string]string{"hello": "world"})
-    msg := message.New(body, message.WithID[[]byte]("msg-001"))
+    msg := message.New(body, message.Attributes{
+        message.AttrID: "msg-001",
+    })
 
     // Send
-    err = sender.Send(context.Background(), "my-queue", []*message.Message[[]byte]{msg})
+    err = sender.Send(context.Background(), "my-queue", []*message.Message{msg})
     if err != nil {
         log.Fatal(err)
     }
@@ -73,7 +79,7 @@ if err != nil {
 
 for _, msg := range msgs {
     var data map[string]string
-    json.Unmarshal(msg.Payload(), &data)
+    json.Unmarshal(msg.Data, &data)
     log.Printf("Received: %v", data)
     msg.Ack() // Acknowledge the message
 }
@@ -96,12 +102,12 @@ msgs := generator.Generate(ctx)
 
 // Process with gopipe
 processPipe := gopipe.NewTransformPipe(
-    func(ctx context.Context, msg *message.Message[[]byte]) (Result, error) {
-        result := processMessage(msg.Payload())
+    func(ctx context.Context, msg *message.Message) (Result, error) {
+        result := processMessage(msg.Data)
         msg.Ack()
         return result, nil
     },
-    gopipe.WithConcurrency[*message.Message[[]byte], Result](5),
+    gopipe.WithConcurrency[*message.Message, Result](5),
 )
 
 results := processPipe.Start(ctx, msgs)
@@ -115,7 +121,7 @@ sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
 sinkPipe := azservicebus.NewMessageSinkPipe(sender, "my-queue", 10, 100*time.Millisecond)
 
 // Create input channel
-msgs := make(chan *message.Message[[]byte])
+msgs := make(chan *message.Message)
 
 // Start the pipeline
 done := sinkPipe.Start(ctx, msgs)
@@ -125,7 +131,7 @@ go func() {
     defer close(msgs)
     for _, order := range orders {
         body, _ := json.Marshal(order)
-        msgs <- message.New(body)
+        msgs <- message.New(body, nil)
     }
 }()
 
@@ -140,13 +146,54 @@ sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
 defer sender.Close()
 
 for msg := range msgs {
-    // Route based on message properties
+    // Route based on message attributes
     targetQueue := "standard-queue"
-    if priority, ok := msg.Properties().Get("priority"); ok && priority == "high" {
+    if priority, ok := msg.Attributes["priority"]; ok && priority == "high" {
         targetQueue = "high-priority-queue"
     }
-    sender.Send(ctx, targetQueue, []*message.Message[[]byte]{msg})
+    sender.Send(ctx, targetQueue, []*message.Message{msg})
 }
+```
+
+### Using Publisher and Subscriber
+
+The library provides `Publisher` and `Subscriber` types that wrap gopipe's `message.NewPublisher` and `message.NewSubscriber` for channel-based message handling:
+
+```go
+// Create a subscriber for continuous message polling
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+subscriber := azservicebus.NewSubscriber(receiver, azservicebus.SubscriberConfig{
+    Concurrency: 1,
+})
+
+msgs := subscriber.Subscribe(ctx, "my-queue")
+for msg := range msgs {
+    log.Printf("Received: %s", msg.Data)
+    msg.Ack()
+}
+
+// Create a publisher for batched message publishing
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+publisher := azservicebus.NewPublisher(sender, azservicebus.PublisherConfig{
+    MaxBatchSize: 10,
+    MaxDuration:  100 * time.Millisecond,
+})
+
+// Messages need AttrTopic attribute for routing
+msgs := make(chan *message.Message)
+done := publisher.Publish(ctx, msgs)
+
+go func() {
+    defer close(msgs)
+    for _, order := range orders {
+        body, _ := json.Marshal(order)
+        msgs <- message.New(body, message.Attributes{
+            message.AttrTopic: "my-queue",
+        })
+    }
+}()
+
+<-done
 ```
 
 ### Multi-Source Subscription with Fan-In
@@ -161,7 +208,7 @@ gen1 := azservicebus.NewMessageGenerator(receiver1, "queue-1")
 gen2 := azservicebus.NewMessageGenerator(receiver2, "queue-2")
 
 // Merge using gopipe FanIn
-fanIn := gopipe.NewFanIn[*message.Message[[]byte]](gopipe.FanInConfig{})
+fanIn := gopipe.NewFanIn[*message.Message](gopipe.FanInConfig{})
 fanIn.Add(gen1.Generate(ctx))
 fanIn.Add(gen2.Generate(ctx))
 merged := fanIn.Start(ctx)
@@ -228,28 +275,28 @@ client, err := azservicebus.NewClientWithConfig(connStr, azservicebus.ClientConf
 
 ## Message Properties
 
-Message properties are automatically mapped between gopipe and Azure Service Bus:
+Message attributes are automatically mapped between gopipe and Azure Service Bus:
 
 ```go
-msg := message.New(body,
-    message.WithID[[]byte]("id-123"),
-    message.WithCorrelationID[[]byte]("corr-456"),
-    message.WithSubject[[]byte]("order.created"),
-    message.WithContentType[[]byte]("application/json"),
-    message.WithTTL[[]byte](1*time.Hour),
-    message.WithProperty[[]byte]("custom", "value"),
-)
+msg := message.New(body, message.Attributes{
+    message.AttrID:              "id-123",
+    message.AttrCorrelationID:   "corr-456",
+    message.AttrSubject:         "order.created",
+    message.AttrDataContentType: "application/json",
+    "ttl":                       1*time.Hour,
+    "custom":                    "value",
+})
 ```
 
-| gopipe Property | Azure Service Bus |
+| gopipe Attribute | Azure Service Bus |
 |-----------------|-------------------|
-| ID | MessageID |
-| CorrelationID | CorrelationID |
-| Subject | Subject |
-| ContentType | ContentType |
-| ReplyTo | ReplyTo |
-| TTL | TimeToLive |
-| Custom properties | ApplicationProperties |
+| `message.AttrID` | MessageID |
+| `message.AttrCorrelationID` | CorrelationID |
+| `message.AttrSubject` | Subject |
+| `message.AttrDataContentType` | ContentType |
+| `message.AttrTime` | EnqueuedTime (read-only) |
+| `"ttl"` | TimeToLive |
+| Custom attributes | ApplicationProperties |
 
 ## Architecture
 
@@ -310,6 +357,54 @@ make build
 ## License
 
 See [LICENSE](LICENSE) file.
+
+## Architecture Evaluation
+
+### gopipe v0.10.0 Integration
+
+This library was refactored to leverage gopipe v0.10.0's built-in `message.NewPublisher` and `message.NewSubscriber` implementations, following the principle of not reinventing the wheel.
+
+#### Design Decisions
+
+1. **Interface Implementation**: `Sender` and `Receiver` implement gopipe's `message.Sender` and `message.Receiver` interfaces directly, enabling seamless integration with gopipe's Publisher/Subscriber infrastructure.
+
+2. **Type Aliases**: `Publisher` and `Subscriber` are simple type aliases to gopipe's implementations with convenience constructors, reducing code duplication and ensuring consistent behavior.
+
+3. **CloudEvents Alignment**: gopipe v0.10.0 uses a CloudEvents-aligned message model with `message.Attributes` map instead of generic type parameters, simplifying the API.
+
+#### Comparison: Direct vs gopipe Integration
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Direct Sender/Receiver** | Full control, explicit batching, simpler debugging | Manual batch management, no built-in polling |
+| **gopipe Publisher/Subscriber** | Automatic batching, continuous polling, consistent API | Less control over timing, additional abstraction layer |
+| **gopipe Generator/SinkPipe** | Pipeline integration, composable with other gopipe stages | Requires understanding gopipe patterns |
+
+#### When to Use What
+
+- **Sender.Send/Receiver.Receive**: Use for simple, one-off operations or when you need precise control over batching and timing.
+- **Publisher/Subscriber**: Use for continuous message streams with automatic batching and polling.
+- **Generator/SinkPipe helpers**: Use when building complex pipelines with gopipe transformations, fan-in/fan-out, or parallel processing.
+
+### Benchmark Results
+
+Run benchmarks with an Azure Service Bus connection:
+
+```bash
+AZURE_SERVICEBUS_CONNECTION_STRING="..." go test -bench=. -benchmem
+```
+
+The benchmarks compare:
+- `BenchmarkSenderDirect`: Direct Sender.Send calls with manual batching
+- `BenchmarkSenderGopipeBatchPipe`: Using gopipe's BatchPipe
+- `BenchmarkSenderGopipeHelper`: Using the NewMessageSinkPipe helper
+- `BenchmarkPublisher`: Using the Publisher wrapper
+- `BenchmarkSubscriber`: Using the Subscriber wrapper
+
+Expected characteristics:
+- Direct sends have lowest overhead but require manual batch management
+- gopipe integration adds minimal overhead while providing richer functionality
+- Publisher/Subscriber provide the most convenient API with automatic batching
 
 ## Resources
 

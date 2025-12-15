@@ -24,7 +24,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	servicebus "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe/message"
 	"github.com/joho/godotenv"
@@ -80,15 +79,18 @@ func main() {
 	}
 }
 
-func runDemo(ctx context.Context, client *azservicebus.Client, queueName string) error {
+func runDemo(ctx context.Context, client interface{ Close(context.Context) error }, queueName string) error {
+	// Type assert to get the actual client
+	sbClient := client.(*servicebus.Client)
+
 	// Create sender
-	sender := servicebus.NewSender(client, servicebus.SenderConfig{
+	sender := servicebus.NewSender(sbClient, servicebus.SenderConfig{
 		SendTimeout: 30 * time.Second,
 	})
 	defer sender.Close()
 
 	// Create receiver
-	receiver := servicebus.NewReceiver(client, servicebus.ReceiverConfig{
+	receiver := servicebus.NewReceiver(sbClient, servicebus.ReceiverConfig{
 		ReceiveTimeout:  10 * time.Second,
 		MaxMessageCount: 10,
 	})
@@ -102,7 +104,7 @@ func runDemo(ctx context.Context, client *azservicebus.Client, queueName string)
 	go func() {
 		for msg := range msgs {
 			var order Order
-			if err := json.Unmarshal(msg.Payload(), &order); err != nil {
+			if err := json.Unmarshal(msg.Data, &order); err != nil {
 				log.Printf("Failed to unmarshal message: %v", err)
 				msg.Nack(err)
 				continue
@@ -117,7 +119,7 @@ func runDemo(ctx context.Context, client *azservicebus.Client, queueName string)
 	sinkPipe := servicebus.NewMessageSinkPipe(sender, queueName, 5, 100*time.Millisecond)
 
 	// Create message channel
-	pubMsgs := make(chan *message.Message[[]byte])
+	pubMsgs := make(chan *message.Message)
 
 	// Start the sink pipeline
 	done := sinkPipe.Start(ctx, pubMsgs)
@@ -137,10 +139,10 @@ func runDemo(ctx context.Context, client *azservicebus.Client, queueName string)
 				log.Printf("Failed to marshal order: %v", err)
 				continue
 			}
-			msg := message.New(body,
-				message.WithID[[]byte](order.ID),
-				message.WithProperty[[]byte]("customer", order.Customer),
-			)
+			msg := message.New(body, message.Attributes{
+				message.AttrID: order.ID,
+				"customer":     order.Customer,
+			})
 			select {
 			case pubMsgs <- msg:
 				log.Printf("Published order: %s", order.ID)

@@ -39,7 +39,7 @@ func TestSender_BasicSend(t *testing.T) {
 
 	// Create and send messages
 	messageCount := 10
-	messages := make([]*message.Message[[]byte], messageCount)
+	messages := make([]*message.Message, messageCount)
 	for i := range messages {
 		payload := map[string]any{
 			"id":      i + 1,
@@ -49,7 +49,7 @@ func TestSender_BasicSend(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to marshal payload: %v", err)
 		}
-		messages[i] = message.New(body, message.WithProperty[[]byte]("index", i+1))
+		messages[i] = message.New(body, message.Attributes{"index": i + 1})
 	}
 
 	// Send messages
@@ -107,10 +107,10 @@ func TestReceiver_BasicReceive(t *testing.T) {
 	defer sender.Close()
 
 	messageCount := 5
-	messages := make([]*message.Message[[]byte], messageCount)
+	messages := make([]*message.Message, messageCount)
 	for i := range messages {
 		body, _ := json.Marshal(map[string]any{"id": i + 1, "text": fmt.Sprintf("message-%d", i+1)})
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	if err := sender.Send(ctx, queueName, messages); err != nil {
@@ -135,7 +135,7 @@ func TestReceiver_BasicReceive(t *testing.T) {
 	}
 
 	for i, msg := range received {
-		t.Logf("Received message %d: %s", i+1, string(msg.Payload()))
+		t.Logf("Received message %d: %s", i+1, string(msg.Data))
 		msg.Ack()
 	}
 }
@@ -170,9 +170,9 @@ func TestReceiver_TopicSubscription(t *testing.T) {
 	defer sender.Close()
 
 	body, _ := json.Marshal(map[string]string{"message": "hello from topic"})
-	msg := message.New(body)
+	msg := message.New(body, nil)
 
-	if err := sender.Send(ctx, topicName, []*message.Message[[]byte]{msg}); err != nil {
+	if err := sender.Send(ctx, topicName, []*message.Message{msg}); err != nil {
 		t.Fatalf("Failed to send to topic: %v", err)
 	}
 	time.Sleep(1 * time.Second)
@@ -194,7 +194,7 @@ func TestReceiver_TopicSubscription(t *testing.T) {
 		t.Fatalf("Expected 1 message, got %d", len(received))
 	}
 
-	t.Logf("Received from topic: %s", string(received[0].Payload()))
+	t.Logf("Received from topic: %s", string(received[0].Data))
 	received[0].Ack()
 }
 
@@ -224,10 +224,10 @@ func TestGopipeIntegration_Generator(t *testing.T) {
 	defer sender.Close()
 
 	messageCount := 5
-	messages := make([]*message.Message[[]byte], messageCount)
+	messages := make([]*message.Message, messageCount)
 	for i := range messages {
 		body, _ := json.Marshal(map[string]int{"id": i + 1})
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 	if err := sender.Send(ctx, queueName, messages); err != nil {
 		t.Fatalf("Failed to send messages: %v", err)
@@ -255,7 +255,7 @@ loop:
 				break loop
 			}
 			received++
-			t.Logf("Received message %d: %s", received, string(msg.Payload()))
+			t.Logf("Received message %d: %s", received, string(msg.Data))
 			msg.Ack()
 			if received >= messageCount {
 				break loop
@@ -296,7 +296,7 @@ func TestGopipeIntegration_SinkPipe(t *testing.T) {
 	sinkPipe := NewMessageSinkPipe(sender, queueName, 5, 100*time.Millisecond)
 
 	// Create message channel
-	in := make(chan *message.Message[[]byte])
+	in := make(chan *message.Message)
 
 	// Start the pipeline
 	out := sinkPipe.Start(ctx, in)
@@ -307,7 +307,7 @@ func TestGopipeIntegration_SinkPipe(t *testing.T) {
 		defer close(in)
 		for i := range messageCount {
 			body, _ := json.Marshal(map[string]int{"id": i + 1})
-			in <- message.New(body)
+			in <- message.New(body, nil)
 		}
 	}()
 
@@ -395,14 +395,14 @@ func TestSenderReceiver_EndToEnd(t *testing.T) {
 
 	// Send messages in batches using sink pipe
 	sinkPipe := NewMessageSinkPipe(sender, queueName, 5, 50*time.Millisecond)
-	in := make(chan *message.Message[[]byte])
+	in := make(chan *message.Message)
 	out := sinkPipe.Start(ctx, in)
 
 	go func() {
 		defer close(in)
 		for i := range messageCount {
 			body, _ := json.Marshal(map[string]int{"id": i + 1})
-			in <- message.New(body)
+			in <- message.New(body, nil)
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
@@ -460,7 +460,7 @@ func TestSender_MultipleDestinations(t *testing.T) {
 			dest = queue2
 		}
 		body, _ := json.Marshal(map[string]any{"id": i, "dest": dest})
-		if err := sender.Send(ctx, dest, []*message.Message[[]byte]{message.New(body)}); err != nil {
+		if err := sender.Send(ctx, dest, []*message.Message{message.New(body, nil)}); err != nil {
 			t.Fatalf("Failed to send: %v", err)
 		}
 	}
@@ -507,7 +507,7 @@ func TestSender_ClosedSender(t *testing.T) {
 	sender.Close()
 
 	body, _ := json.Marshal(map[string]string{"test": "data"})
-	err = sender.Send(context.Background(), "test-queue", []*message.Message[[]byte]{message.New(body)})
+	err = sender.Send(context.Background(), "test-queue", []*message.Message{message.New(body, nil)})
 	if err == nil {
 		t.Error("Expected error when sending with closed sender")
 	}
@@ -560,10 +560,10 @@ func TestSender_BatchingBehavior(t *testing.T) {
 	defer sender.Close()
 
 	// Send exactly 3 messages in a batch
-	messages := make([]*message.Message[[]byte], 3)
+	messages := make([]*message.Message, 3)
 	for i := range messages {
 		body, _ := json.Marshal(map[string]int{"id": i})
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	if err := sender.Send(ctx, queueName, messages); err != nil {
@@ -571,4 +571,247 @@ func TestSender_BatchingBehavior(t *testing.T) {
 	}
 
 	t.Log("Batch sending complete")
+}
+
+// TestPublisher_BasicPublish tests basic Publisher functionality
+func TestPublisher_BasicPublish(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	queueName := GenerateTestName(t, "test-pub-basic")
+	helper.CreateQueue(ctx, queueName)
+
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	sender := NewSender(client, SenderConfig{})
+	defer sender.Close()
+
+	publisher := NewPublisher(sender, PublisherConfig{
+		MaxBatchSize: 5,
+		MaxDuration:  100 * time.Millisecond,
+	})
+
+	// Create message channel
+	msgs := make(chan *message.Message)
+	messageCount := 10
+
+	// Start publishing - messages need topic attribute for routing
+	done := publisher.Publish(ctx, msgs)
+
+	// Send messages with topic attribute
+	go func() {
+		defer close(msgs)
+		for i := range messageCount {
+			body, _ := json.Marshal(map[string]int{"id": i + 1})
+			msgs <- message.New(body, message.Attributes{message.AttrTopic: queueName})
+		}
+	}()
+
+	// Wait for publishing to complete
+	<-done
+	t.Log("Publishing complete")
+
+	// Verify messages were sent
+	time.Sleep(1 * time.Second)
+
+	receiver := NewReceiver(client, ReceiverConfig{
+		ReceiveTimeout:  5 * time.Second,
+		MaxMessageCount: messageCount,
+	})
+	defer receiver.Close()
+
+	received, err := receiver.Receive(ctx, queueName)
+	if err != nil {
+		t.Fatalf("Failed to receive messages: %v", err)
+	}
+
+	if len(received) != messageCount {
+		t.Errorf("Expected %d messages, got %d", messageCount, len(received))
+	}
+
+	for _, msg := range received {
+		msg.Ack()
+	}
+}
+
+// TestSubscriber_BasicSubscribe tests basic Subscriber functionality
+func TestSubscriber_BasicSubscribe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	queueName := GenerateTestName(t, "test-sub-basic")
+	helper.CreateQueue(ctx, queueName)
+
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// First, send some messages
+	sender := NewSender(client, SenderConfig{})
+	defer sender.Close()
+
+	messageCount := 5
+	messages := make([]*message.Message, messageCount)
+	for i := range messages {
+		body, _ := json.Marshal(map[string]int{"id": i + 1})
+		messages[i] = message.New(body, nil)
+	}
+	if err := sender.Send(ctx, queueName, messages); err != nil {
+		t.Fatalf("Failed to send messages: %v", err)
+	}
+	time.Sleep(1 * time.Second)
+
+	// Subscribe to receive messages
+	receiver := NewReceiver(client, ReceiverConfig{
+		ReceiveTimeout:  5 * time.Second,
+		MaxMessageCount: 5,
+	})
+	defer receiver.Close()
+
+	subscriber := NewSubscriber(receiver, SubscriberConfig{
+		Concurrency: 1,
+	})
+
+	msgs := subscriber.Subscribe(ctx, queueName)
+
+	received := 0
+	timeout := time.After(10 * time.Second)
+
+loop:
+	for {
+		select {
+		case msg, ok := <-msgs:
+			if !ok {
+				break loop
+			}
+			received++
+			t.Logf("Received message %d: %s", received, string(msg.Data))
+			msg.Ack()
+			if received >= messageCount {
+				break loop
+			}
+		case <-timeout:
+			break loop
+		}
+	}
+
+	if received != messageCount {
+		t.Errorf("Expected %d messages, got %d", messageCount, received)
+	}
+}
+
+// TestPublisherSubscriber_EndToEnd tests full Publisher/Subscriber flow
+func TestPublisherSubscriber_EndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	helper := NewTestHelper(t)
+	defer helper.Cleanup()
+
+	queueName := GenerateTestName(t, "test-pubsub-e2e")
+	helper.CreateQueue(ctx, queueName)
+
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// Create sender and receiver
+	sender := NewSender(client, SenderConfig{})
+	defer sender.Close()
+
+	receiver := NewReceiver(client, ReceiverConfig{
+		ReceiveTimeout:  5 * time.Second,
+		MaxMessageCount: 10,
+	})
+	defer receiver.Close()
+
+	// Create publisher and subscriber
+	publisher := NewPublisher(sender, PublisherConfig{
+		MaxBatchSize: 5,
+		MaxDuration:  50 * time.Millisecond,
+	})
+
+	subscriber := NewSubscriber(receiver, SubscriberConfig{
+		Concurrency: 1,
+	})
+
+	// Start subscriber
+	msgs := subscriber.Subscribe(ctx, queueName)
+
+	var receivedCount atomic.Int32
+	messageCount := 20
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for msg := range msgs {
+			count := receivedCount.Add(1)
+			t.Logf("Received message %d", count)
+			msg.Ack()
+			if count >= int32(messageCount) {
+				return
+			}
+		}
+	}()
+
+	// Give subscriber time to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Start publisher
+	pubMsgs := make(chan *message.Message)
+	done := publisher.Publish(ctx, pubMsgs)
+
+	go func() {
+		defer close(pubMsgs)
+		for i := range messageCount {
+			body, _ := json.Marshal(map[string]int{"id": i + 1})
+			pubMsgs <- message.New(body, message.Attributes{message.AttrTopic: queueName})
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	// Wait for publishing to complete
+	<-done
+	t.Log("Publishing complete")
+
+	// Wait for all messages to be received
+	doneWait := make(chan struct{})
+	go func() {
+		for receivedCount.Load() < int32(messageCount) {
+			time.Sleep(100 * time.Millisecond)
+		}
+		close(doneWait)
+	}()
+
+	select {
+	case <-doneWait:
+		t.Logf("Successfully received all %d messages", messageCount)
+	case <-time.After(30 * time.Second):
+		t.Errorf("Timeout: received %d/%d messages", receivedCount.Load(), messageCount)
+	}
 }

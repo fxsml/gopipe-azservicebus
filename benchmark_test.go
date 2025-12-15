@@ -42,11 +42,11 @@ func BenchmarkSenderDirect(b *testing.B) {
 	defer sender.Close()
 
 	// Prepare messages
-	messages := make([]*message.Message[[]byte], b.N)
+	messages := make([]*message.Message, b.N)
 	for i := range b.N {
 		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
 		body, _ := json.Marshal(msg)
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	b.ResetTimer()
@@ -87,11 +87,11 @@ func BenchmarkSenderGopipeBatchPipe(b *testing.B) {
 	defer sender.Close()
 
 	// Prepare messages
-	messages := make([]*message.Message[[]byte], b.N)
+	messages := make([]*message.Message, b.N)
 	for i := range b.N {
 		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
 		body, _ := json.Marshal(msg)
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	b.ResetTimer()
@@ -101,7 +101,7 @@ func BenchmarkSenderGopipeBatchPipe(b *testing.B) {
 	batchSize := 10
 	batchTimeout := 50 * time.Millisecond
 	batchPipe := gopipe.NewBatchPipe(
-		func(ctx context.Context, batch []*message.Message[[]byte]) ([]struct{}, error) {
+		func(ctx context.Context, batch []*message.Message) ([]struct{}, error) {
 			if err := sender.Send(ctx, queueName, batch); err != nil {
 				return nil, err
 			}
@@ -112,7 +112,7 @@ func BenchmarkSenderGopipeBatchPipe(b *testing.B) {
 	)
 
 	// Create input channel
-	in := make(chan *message.Message[[]byte], b.N)
+	in := make(chan *message.Message, b.N)
 	go func() {
 		for _, msg := range messages {
 			in <- msg
@@ -149,11 +149,11 @@ func BenchmarkSenderGopipeHelper(b *testing.B) {
 	defer sender.Close()
 
 	// Prepare messages
-	messages := make([]*message.Message[[]byte], b.N)
+	messages := make([]*message.Message, b.N)
 	for i := range b.N {
 		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
 		body, _ := json.Marshal(msg)
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	b.ResetTimer()
@@ -163,7 +163,7 @@ func BenchmarkSenderGopipeHelper(b *testing.B) {
 	sinkPipe := NewMessageSinkPipe(sender, queueName, 10, 50*time.Millisecond)
 
 	// Create input channel
-	in := make(chan *message.Message[[]byte], b.N)
+	in := make(chan *message.Message, b.N)
 	go func() {
 		for _, msg := range messages {
 			in <- msg
@@ -202,11 +202,11 @@ func BenchmarkReceiverDirect(b *testing.B) {
 
 	// First, publish messages
 	sender := NewSender(client, SenderConfig{})
-	messages := make([]*message.Message[[]byte], b.N)
+	messages := make([]*message.Message, b.N)
 	for i := range b.N {
 		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
 		body, _ := json.Marshal(msg)
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	batchSize := 100
@@ -267,11 +267,11 @@ func BenchmarkReceiverGopipeGenerator(b *testing.B) {
 
 	// First, publish messages to subscribe to
 	sender := NewSender(client, SenderConfig{})
-	messages := make([]*message.Message[[]byte], b.N)
+	messages := make([]*message.Message, b.N)
 	for i := range b.N {
 		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
 		body, _ := json.Marshal(msg)
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	// Send in batches
@@ -300,7 +300,7 @@ func BenchmarkReceiverGopipeGenerator(b *testing.B) {
 	defer receiver.Close()
 
 	generator := gopipe.NewGenerator(
-		func(ctx context.Context) ([]*message.Message[[]byte], error) {
+		func(ctx context.Context) ([]*message.Message, error) {
 			return receiver.Receive(ctx, queueName)
 		},
 	)
@@ -340,11 +340,11 @@ func BenchmarkReceiverGopipeHelper(b *testing.B) {
 
 	// First, publish messages
 	sender := NewSender(client, SenderConfig{})
-	messages := make([]*message.Message[[]byte], b.N)
+	messages := make([]*message.Message, b.N)
 	for i := range b.N {
 		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
 		body, _ := json.Marshal(msg)
-		messages[i] = message.New(body)
+		messages[i] = message.New(body, nil)
 	}
 
 	batchSize := 100
@@ -413,14 +413,14 @@ func BenchmarkConcurrentSend(b *testing.B) {
 		go func(workerID int) {
 			defer wg.Done()
 
-			messages := make([]*message.Message[[]byte], perWorker)
+			messages := make([]*message.Message, perWorker)
 			for i := range perWorker {
 				msg := BenchmarkMessage{
 					ID:      workerID*perWorker + i,
 					Payload: "concurrent-payload",
 				}
 				body, _ := json.Marshal(msg)
-				messages[i] = message.New(body)
+				messages[i] = message.New(body, nil)
 			}
 
 			// Send in batches
@@ -439,6 +439,124 @@ func BenchmarkConcurrentSend(b *testing.B) {
 	}
 
 	wg.Wait()
+}
+
+// BenchmarkPublisher benchmarks the Publisher.Publish method
+func BenchmarkPublisher(b *testing.B) {
+	helper := NewTestHelperB(b)
+	defer helper.Cleanup()
+
+	ctx := context.Background()
+	queueName := GenerateTestNameB(b, "bench-publisher")
+	helper.CreateQueue(ctx, queueName)
+
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		b.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	sender := NewSender(client, SenderConfig{})
+	defer sender.Close()
+
+	publisher := NewPublisher(sender, PublisherConfig{
+		MaxBatchSize: 10,
+		MaxDuration:  50 * time.Millisecond,
+	})
+
+	// Prepare messages
+	messages := make([]*message.Message, b.N)
+	for i := range b.N {
+		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
+		body, _ := json.Marshal(msg)
+		messages[i] = message.New(body, message.Attributes{message.AttrTopic: queueName})
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	// Create input channel
+	in := make(chan *message.Message, b.N)
+	go func() {
+		for _, msg := range messages {
+			in <- msg
+		}
+		close(in)
+	}()
+
+	// Start publishing
+	done := publisher.Publish(ctx, in)
+
+	// Wait for completion
+	<-done
+}
+
+// BenchmarkSubscriber benchmarks the Subscriber.Subscribe method
+func BenchmarkSubscriber(b *testing.B) {
+	if b.N < 10 {
+		b.Skip("Skipping subscriber benchmark for small N")
+	}
+
+	helper := NewTestHelperB(b)
+	defer helper.Cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	queueName := GenerateTestNameB(b, "bench-subscriber")
+	helper.CreateQueue(ctx, queueName)
+
+	client, err := NewClient(helper.ConnectionString())
+	if err != nil {
+		b.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// First, publish messages
+	sender := NewSender(client, SenderConfig{})
+	messages := make([]*message.Message, b.N)
+	for i := range b.N {
+		msg := BenchmarkMessage{ID: i, Payload: "benchmark-payload"}
+		body, _ := json.Marshal(msg)
+		messages[i] = message.New(body, nil)
+	}
+
+	batchSize := 100
+	for i := 0; i < len(messages); i += batchSize {
+		end := i + batchSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+		if err := sender.Send(ctx, queueName, messages[i:end]); err != nil {
+			b.Fatalf("Failed to send messages: %v", err)
+		}
+	}
+	sender.Close()
+
+	time.Sleep(1 * time.Second)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	receiver := NewReceiver(client, ReceiverConfig{
+		MaxMessageCount: 10,
+	})
+	defer receiver.Close()
+
+	subscriber := NewSubscriber(receiver, SubscriberConfig{
+		Concurrency: 1,
+	})
+
+	msgs := subscriber.Subscribe(ctx, queueName)
+
+	received := 0
+	for msg := range msgs {
+		msg.Ack()
+		received++
+		if received >= b.N {
+			break
+		}
+	}
 }
 
 // NewTestHelperB creates a test helper for benchmarks

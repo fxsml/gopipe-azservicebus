@@ -47,7 +47,7 @@ func TestSenderAndReceiver_EndToEnd(t *testing.T) {
 
 	// Send test messages
 	messageCount := 5
-	messages := make([]*message.Message[[]byte], 0, messageCount)
+	messages := make([]*message.Message, 0, messageCount)
 	for i := 1; i <= messageCount; i++ {
 		// Marshal to JSON
 		payload := map[string]any{
@@ -59,10 +59,9 @@ func TestSenderAndReceiver_EndToEnd(t *testing.T) {
 			t.Fatalf("Failed to marshal payload: %v", err)
 		}
 
-		msg := message.New(
-			body,
-			message.WithProperty[[]byte]("message_index", fmt.Sprintf("%d", i)),
-		)
+		msg := message.New(body, message.Attributes{
+			"message_index": fmt.Sprintf("%d", i),
+		})
 		messages = append(messages, msg)
 	}
 
@@ -90,7 +89,7 @@ func TestSenderAndReceiver_EndToEnd(t *testing.T) {
 	for i, msg := range receivedMessages {
 		// Unmarshal payload
 		var payload map[string]any
-		if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
+		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			t.Errorf("Failed to unmarshal payload: %v", err)
 			msg.Nack(fmt.Errorf("unmarshal failed"))
 			continue
@@ -146,9 +145,9 @@ func TestSender_MultipleQueues(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to marshal payload: %v", err)
 		}
-		msg := message.New(body)
+		msg := message.New(body, nil)
 
-		err = sender.Send(ctx, queueName, []*message.Message[[]byte]{msg})
+		err = sender.Send(ctx, queueName, []*message.Message{msg})
 		if err != nil {
 			t.Fatalf("Failed to send to queue %s: %v", queueName, err)
 		}
@@ -190,16 +189,15 @@ func TestReceiver_MessageMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to marshal payload: %v", err)
 	}
-	msg := message.New(
-		body,
-		message.WithProperty[[]byte]("message_id", messageID),
-		message.WithProperty[[]byte]("subject", "test-subject"),
-		message.WithProperty[[]byte]("content_type", "application/json"),
-		message.WithProperty[[]byte]("correlation_id", "corr-789"),
-		message.WithProperty[[]byte]("custom_prop", "custom_value"),
-	)
+	msg := message.New(body, message.Attributes{
+		"message_id":     messageID,
+		"subject":        "test-subject",
+		"content_type":   "application/json",
+		"correlation_id": "corr-789",
+		"custom_prop":    "custom_value",
+	})
 
-	err = sender.Send(ctx, queueName, []*message.Message[[]byte]{msg})
+	err = sender.Send(ctx, queueName, []*message.Message{msg})
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
@@ -226,23 +224,23 @@ func TestReceiver_MessageMetadata(t *testing.T) {
 	receivedMsg := receivedMessages[0]
 
 	// Verify metadata was mapped correctly
-	if val, ok := receivedMsg.Properties().Get("message_id"); !ok || val != messageID {
+	if val, ok := receivedMsg.Attributes["message_id"]; !ok || val != messageID {
 		t.Errorf("Expected message_id %s, got %v", messageID, val)
 	}
 
-	if val, ok := receivedMsg.Properties().Get("subject"); !ok || val != "test-subject" {
+	if val, ok := receivedMsg.Attributes["subject"]; !ok || val != "test-subject" {
 		t.Errorf("Expected subject 'test-subject', got %v", val)
 	}
 
-	if val, ok := receivedMsg.Properties().Get("content_type"); !ok || val != "application/json" {
+	if val, ok := receivedMsg.Attributes["content_type"]; !ok || val != "application/json" {
 		t.Errorf("Expected content_type 'application/json', got %v", val)
 	}
 
-	if val, ok := receivedMsg.Properties().Get("correlation_id"); !ok || val != "corr-789" {
+	if val, ok := receivedMsg.Attributes["correlation_id"]; !ok || val != "corr-789" {
 		t.Errorf("Expected correlation_id 'corr-789', got %v", val)
 	}
 
-	if val, ok := receivedMsg.Properties().Get("custom_prop"); !ok || val != "custom_value" {
+	if val, ok := receivedMsg.Attributes["custom_prop"]; !ok || val != "custom_value" {
 		t.Errorf("Expected custom_prop 'custom_value', got %v", val)
 	}
 
@@ -289,9 +287,9 @@ func TestSender_WithTopic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to marshal payload: %v", err)
 	}
-	msg := message.New(body)
+	msg := message.New(body, nil)
 
-	err = sender.Send(ctx, topicName, []*message.Message[[]byte]{msg})
+	err = sender.Send(ctx, topicName, []*message.Message{msg})
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
@@ -319,7 +317,7 @@ func TestSender_WithTopic(t *testing.T) {
 	}
 
 	var receivedPayload map[string]any
-	if err := json.Unmarshal(receivedMessages[0].Payload(), &receivedPayload); err != nil {
+	if err := json.Unmarshal(receivedMessages[0].Data, &receivedPayload); err != nil {
 		t.Fatalf("Failed to unmarshal payload: %v", err)
 	}
 
@@ -357,9 +355,9 @@ func TestSender_ClosedSenderReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to marshal payload: %v", err)
 	}
-	msg := message.New(body)
+	msg := message.New(body, nil)
 
-	err = sender.Send(ctx, "test-queue", []*message.Message[[]byte]{msg})
+	err = sender.Send(ctx, "test-queue", []*message.Message{msg})
 	if err == nil {
 		t.Error("Expected error when sending with closed sender, got nil")
 	}

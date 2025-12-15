@@ -11,7 +11,11 @@ import (
 	"github.com/fxsml/gopipe/message"
 )
 
-// Sender sends messages to Azure Service Bus queues and topics
+// Ensure Sender implements message.Sender interface
+var _ message.Sender = (*Sender)(nil)
+
+// Sender sends messages to Azure Service Bus queues and topics.
+// It implements the message.Sender interface from gopipe.
 type Sender struct {
 	client    *azservicebus.Client
 	config    SenderConfig
@@ -54,17 +58,14 @@ func NewSender(client *azservicebus.Client, config SenderConfig) *Sender {
 }
 
 // Send sends a batch of messages to the specified Azure Service Bus queue or topic.
+// It implements the message.Sender interface from gopipe.
 //
-// The queueOrTopic parameter can be either a queue name or a topic name.
+// The topic parameter can be either a queue name or a topic name.
 //
 // The method includes resilience mechanisms:
 //   - Automatic sender recreation on connection loss
 //   - Timeout handling for send operations
-//   - Error handling and reporting via ErrorHandler
-//
-// Messages are automatically marshaled to JSON (or custom MarshalFunc).
-// Metadata from message.Message is mapped to Azure Service Bus message properties.
-func (s *Sender) Send(ctx context.Context, queueOrTopic string, msgs []*message.Message[[]byte]) error {
+func (s *Sender) Send(ctx context.Context, topic string, msgs []*message.Message) error {
 	// Check if sender is closed
 	s.closeMu.RLock()
 	if s.closed {
@@ -78,12 +79,12 @@ func (s *Sender) Send(ctx context.Context, queueOrTopic string, msgs []*message.
 	}
 
 	// Get or create sender for this queue/topic
-	sbSender, err := s.getOrCreateSender(queueOrTopic)
+	sbSender, err := s.getOrCreateSender(topic)
 	if err != nil {
 		return err
 	}
 
-	// Convert to azservicebus.Messages, filtering out failed transformations
+	// Convert to azservicebus.Messages
 	sbMessages := make([]*azservicebus.Message, 0, len(msgs))
 	for _, msg := range msgs {
 		sbMsg := s.transformMessage(msg)
@@ -102,7 +103,7 @@ func (s *Sender) Send(ctx context.Context, queueOrTopic string, msgs []*message.
 		var sbErr *azservicebus.Error
 		if errors.As(err, &sbErr) && (sbErr.Code == azservicebus.CodeConnectionLost || sbErr.Code == azservicebus.CodeClosed) {
 			// Recreate the sender and retry once
-			newSender, recreateErr := s.recreateSender(queueOrTopic)
+			newSender, recreateErr := s.recreateSender(topic)
 			if recreateErr != nil {
 				return fmt.Errorf("failed to recreate sender after connection loss: %w", recreateErr)
 			}
@@ -151,9 +152,9 @@ func (s *Sender) getOrCreateSender(queueOrTopic string) (*azservicebus.Sender, e
 }
 
 // transformMessage transforms a gopipe Message to an Azure Service Bus Message
-func (s *Sender) transformMessage(msg *message.Message[[]byte]) *azservicebus.Message {
-	// Use payload directly as body (it's already []byte)
-	body := msg.Payload()
+func (s *Sender) transformMessage(msg *message.Message) *azservicebus.Message {
+	// Use Data directly as body (it's already []byte)
+	body := msg.Data
 
 	// Create Azure Service Bus message
 	sbMsg := &azservicebus.Message{
@@ -161,8 +162,8 @@ func (s *Sender) transformMessage(msg *message.Message[[]byte]) *azservicebus.Me
 		ApplicationProperties: make(map[string]any),
 	}
 
-	// Map metadata to Service Bus properties
-	msg.Properties().Range(func(key string, value any) bool {
+	// Map attributes to Service Bus properties
+	for key, value := range msg.Attributes {
 		// Convert value to string if it's not already
 		strValue, ok := value.(string)
 		if !ok {
@@ -170,44 +171,27 @@ func (s *Sender) transformMessage(msg *message.Message[[]byte]) *azservicebus.Me
 		}
 
 		switch key {
-		case message.PropID:
+		case message.AttrID:
 			v := strValue
 			sbMsg.MessageID = &v
-		case message.PropCorrelationID:
+		case message.AttrCorrelationID:
 			v := strValue
 			sbMsg.CorrelationID = &v
-		case message.PropCreatedAt:
-			// read-only property, ignore
-		case message.PropRetryCount:
-			// read-only property, ignore
-		case message.PropDeadline:
-			// read-only property, ignore
-		case message.PropSequenceNumber:
-			// read-only property, ignore
-		case message.PropPartitionKey:
-			// read-only property, ignore
-		case message.PropPartitionOffset:
-			// read-only property, ignore
-		case message.PropTTL:
-			if value, ok := value.(time.Duration); ok {
-				sbMsg.TimeToLive = &value
-			}
-		case message.PropSubject:
+		case message.AttrSubject:
 			v := strValue
 			sbMsg.Subject = &v
-		case message.PropContentType:
+		case message.AttrDataContentType:
 			v := strValue
 			sbMsg.ContentType = &v
-		case message.PropReplyTo:
-			v := strValue
-			sbMsg.ReplyTo = &v
-
+		case "ttl":
+			if ttl, ok := value.(time.Duration); ok {
+				sbMsg.TimeToLive = &ttl
+			}
 		default:
-			// All other metadata goes to application properties
+			// All other attributes go to application properties
 			sbMsg.ApplicationProperties[key] = value
 		}
-		return true
-	})
+	}
 	return sbMsg
 }
 

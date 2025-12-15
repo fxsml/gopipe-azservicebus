@@ -22,6 +22,8 @@ github.com/fortytw2/leaktest v1.3.0 h1:u8491cBMTQ8ft8aeV+adlcytMZylmA5nnwwkRZjI8
 github.com/fortytw2/leaktest v1.3.0/go.mod h1:jDsjWgpAGjm2CA7WthBh/CdZYEPF31XHquHwclZch5g=
 github.com/fxsml/gopipe v0.9.2 h1:eaUyLu5XmvudLD8lJ6003apItbEwBYYrVnU39OvLyM0=
 github.com/fxsml/gopipe v0.9.2/go.mod h1:yw128NpWQW6DhvLkyNsiRTbUaKENXNOEJuo7Jw3P2Jc=
+github.com/fxsml/gopipe v0.10.0 h1:8T8W6GpbyPaXLunZjU2dDXam/Joj3ZIbOJYgHKVNoiw=
+github.com/fxsml/gopipe v0.10.0/go.mod h1:yw128NpWQW6DhvLkyNsiRTbUaKENXNOEJuo7Jw3P2Jc=
 github.com/golang-jwt/jwt/v5 v5.3.0 h1:pv4AsKCKKZuqlgs5sUmn4x8UlGa0kEVt/puTpKx9vvo=
 github.com/golang-jwt/jwt/v5 v5.3.0/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/golang/mock v1.6.0 h1:ErTB+efbowRARo13NNdxyJji2egdxLGQhRaY+DUumQc=

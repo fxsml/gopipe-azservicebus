@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/fxsml/gopipe"
 	servicebus "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe/message"
@@ -88,7 +87,7 @@ func main() {
 	}
 }
 
-func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueName string) error {
+func runReliabilityDemo(ctx context.Context, client *servicebus.Client, queueName string) error {
 	// ========================================
 	// Publish tasks using Sender
 	// ========================================
@@ -109,14 +108,14 @@ func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueN
 		{ID: "task-005", Type: "notify", Payload: "data-5", Retryable: true},
 	}
 
-	msgs := make([]*message.Message[[]byte], len(tasks))
+	msgs := make([]*message.Message, len(tasks))
 	for i, task := range tasks {
 		body, _ := json.Marshal(task)
-		msgs[i] = message.New(body,
-			message.WithID[[]byte](task.ID),
-			message.WithProperty[[]byte]("task_type", task.Type),
-			message.WithProperty[[]byte]("retryable", task.Retryable),
-		)
+		msgs[i] = message.New(body, message.Attributes{
+			message.AttrID:  task.ID,
+			"task_type":     task.Type,
+			"retryable":     task.Retryable,
+		})
 	}
 
 	if err := sender.Send(ctx, queueName, msgs); err != nil {
@@ -148,11 +147,11 @@ func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueN
 
 	// Create processor with retry configuration
 	processPipe := gopipe.NewTransformPipe(
-		func(ctx context.Context, msg *message.Message[[]byte]) (string, error) {
+		func(ctx context.Context, msg *message.Message) (string, error) {
 			processed.Add(1)
 
 			var task Task
-			if err := json.Unmarshal(msg.Payload(), &task); err != nil {
+			if err := json.Unmarshal(msg.Data, &task); err != nil {
 				msg.Nack(err)
 				failed.Add(1)
 				return "", fmt.Errorf("unmarshal error: %w", err)
@@ -180,8 +179,8 @@ func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueN
 			log.Printf("Task %s: %s", task.ID, result)
 			return result, nil
 		},
-		gopipe.WithConcurrency[*message.Message[[]byte], string](2),
-		gopipe.WithRetryConfig[*message.Message[[]byte], string](gopipe.RetryConfig{
+		gopipe.WithConcurrency[*message.Message, string](2),
+		gopipe.WithRetryConfig[*message.Message, string](gopipe.RetryConfig{
 			MaxAttempts: 3,
 			Backoff:     gopipe.ExponentialBackoff(100*time.Millisecond, 2.0, 5*time.Second, 0.1),
 			ShouldRetry: func(err error) bool {

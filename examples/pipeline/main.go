@@ -31,7 +31,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/fxsml/gopipe"
 	servicebus "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe/channel"
@@ -97,7 +96,7 @@ func main() {
 	}
 }
 
-func runPipeline(ctx context.Context, client *azservicebus.Client) error {
+func runPipeline(ctx context.Context, client *servicebus.Client) error {
 	// ========================================
 	// PART 1: Publishing Pipeline with Routing
 	// ========================================
@@ -124,7 +123,7 @@ func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 
 	// Validate and transform orders
 	validationPipe := gopipe.NewTransformPipe(
-		func(ctx context.Context, order Order) (*message.Message[[]byte], error) {
+		func(ctx context.Context, order Order) (*message.Message, error) {
 			// Validate order
 			if order.Amount <= 0 {
 				return nil, fmt.Errorf("invalid order amount: %f", order.Amount)
@@ -140,17 +139,17 @@ func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 			}
 
 			// Create message with properties
-			msg := message.New(body,
-				message.WithID[[]byte](order.ID),
-				message.WithProperty[[]byte]("customer", order.Customer),
-				message.WithProperty[[]byte]("priority", order.Priority),
-				message.WithProperty[[]byte]("amount", order.Amount),
-			)
+			msg := message.New(body, message.Attributes{
+				message.AttrID: order.ID,
+				"customer":     order.Customer,
+				"priority":     order.Priority,
+				"amount":       order.Amount,
+			})
 
 			log.Printf("Validated order: %s (Amount: $%.2f)", order.ID, order.Amount)
 			return msg, nil
 		},
-		gopipe.WithConcurrency[Order, *message.Message[[]byte]](2),
+		gopipe.WithConcurrency[Order, *message.Message](2),
 	)
 
 	validatedMsgs := validationPipe.Start(ctx, orderChan)
@@ -159,14 +158,14 @@ func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 	for msg := range validatedMsgs {
 		// Determine target queue based on amount
 		targetQueue := standardQueue
-		if amount, ok := msg.Properties().Get("amount"); ok {
+		if amount, ok := msg.Attributes["amount"]; ok {
 			if amt, ok := amount.(float64); ok && amt >= highValueThreshold {
 				targetQueue = highValueQueue
 			}
 		}
 
 		// Send to appropriate queue
-		if err := sender.Send(ctx, targetQueue, []*message.Message[[]byte]{msg}); err != nil {
+		if err := sender.Send(ctx, targetQueue, []*message.Message{msg}); err != nil {
 			log.Printf("Failed to send order to %s: %v", targetQueue, err)
 			continue
 		}
@@ -206,16 +205,16 @@ func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 	standardMsgs := standardGen.Generate(ctx)
 
 	// Merge using gopipe FanIn
-	fanIn := gopipe.NewFanIn[*message.Message[[]byte]](gopipe.FanInConfig{})
+	fanIn := gopipe.NewFanIn[*message.Message](gopipe.FanInConfig{})
 	fanIn.Add(highValueMsgs)
 	fanIn.Add(standardMsgs)
 	incomingMsgs := fanIn.Start(ctx)
 
 	// Process orders
 	processPipe := gopipe.NewTransformPipe(
-		func(ctx context.Context, msg *message.Message[[]byte]) (ProcessedOrder, error) {
+		func(ctx context.Context, msg *message.Message) (ProcessedOrder, error) {
 			var order Order
-			if err := json.Unmarshal(msg.Payload(), &order); err != nil {
+			if err := json.Unmarshal(msg.Data, &order); err != nil {
 				msg.Nack(err)
 				return ProcessedOrder{}, err
 			}
@@ -238,7 +237,7 @@ func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 
 			return processed, nil
 		},
-		gopipe.WithConcurrency[*message.Message[[]byte], ProcessedOrder](3),
+		gopipe.WithConcurrency[*message.Message, ProcessedOrder](3),
 	)
 
 	processedOrders := processPipe.Start(ctx, incomingMsgs)
