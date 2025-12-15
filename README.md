@@ -1,14 +1,16 @@
 # gopipe-azservicebus
 
-Azure Service Bus integration for the gopipe pipeline framework.
+Azure Service Bus integration for the [gopipe](https://github.com/fxsml/gopipe) pipeline framework.
 
 ## Features
 
 - **Publisher**: Publish messages from gopipe pipelines to Azure Service Bus queues and topics
-- **Subscriber**: Consume messages from Azure Service Bus and feed them into gopipe pipelines (planned)
-- **Local Development**: Run tests against the Azure Service Bus emulator
+- **Subscriber**: Consume messages from Azure Service Bus and feed them into gopipe pipelines
+- **Multi-Destination Routing**: Route messages to different queues/topics based on content
+- **Multi-Source Subscription**: Merge messages from multiple sources into a single stream
 - **Message Mapping**: Automatic conversion between gopipe messages and Azure Service Bus messages
-- **Metadata Support**: Full support for message properties and application properties
+- **Reliability**: Connection recovery, message acknowledgment, retry support
+- **Local Development**: Run tests against the Azure Service Bus emulator
 
 ## Installation
 
@@ -25,40 +27,122 @@ package main
 
 import (
     "context"
+    "encoding/json"
+    "log"
+    "os"
 
-    "github.com/fxsml/gopipe"
     azservicebus "github.com/fxsml/gopipe-azservicebus"
-    "github.com/fxsml/gopipe/channel"
+    "github.com/fxsml/gopipe/message"
+    "github.com/joho/godotenv"
 )
 
 func main() {
-    // Create client using connection string
-    client, err := azservicebus.NewClient("Endpoint=sb://...")
+    _ = godotenv.Load()
+
+    client, err := azservicebus.NewClient(os.Getenv("AZURE_SERVICEBUS_CONNECTION_STRING"))
     if err != nil {
-        panic(err)
+        log.Fatal(err)
     }
     defer client.Close(context.Background())
 
-    // Create publisher
     publisher := azservicebus.NewPublisher(client, azservicebus.PublisherConfig{})
     defer publisher.Close()
 
-    // Create and publish message
-    msg := &gopipe.Message[any]{
-        Payload: map[string]string{"hello": "world"},
-    }
-    msg.Properties().Set("message_id", "123")
+    // Create message
+    body, _ := json.Marshal(map[string]string{"hello": "world"})
+    msg := message.New(body, message.WithID[[]byte]("msg-001"))
 
-    err = publisher.Publish("my-queue", channel.FromValues(msg))
+    // Publish
+    err = publisher.PublishSync(context.Background(), "my-queue", []*message.Message[[]byte]{msg})
     if err != nil {
-        panic(err)
+        log.Fatal(err)
     }
+    log.Println("Message sent!")
+}
+```
+
+### Subscribing to Messages
+
+```go
+subscriber := azservicebus.NewSubscriber(client, azservicebus.SubscriberConfig{
+    ReceiveTimeout:  10 * time.Second,
+    MaxMessageCount: 10,
+})
+defer subscriber.Close()
+
+msgs, err := subscriber.Subscribe(ctx, "my-queue")
+if err != nil {
+    log.Fatal(err)
+}
+
+for msg := range msgs {
+    var data map[string]string
+    json.Unmarshal(msg.Payload(), &data)
+    log.Printf("Received: %v", data)
+    msg.Ack() // Acknowledge the message
+}
+```
+
+### Using with gopipe Pipeline
+
+```go
+import (
+    "github.com/fxsml/gopipe"
+    "github.com/fxsml/gopipe/channel"
+)
+
+// Subscribe to messages
+msgs, _ := subscriber.Subscribe(ctx, "my-queue")
+
+// Process with gopipe
+processPipe := gopipe.NewTransformPipe(
+    func(ctx context.Context, msg *message.Message[[]byte]) (Result, error) {
+        result := processMessage(msg.Payload())
+        msg.Ack()
+        return result, nil
+    },
+    gopipe.WithConcurrency[*message.Message[[]byte], Result](5),
+)
+
+results := processPipe.Start(ctx, msgs)
+
+<-channel.Sink(results, func(r Result) {
+    log.Printf("Processed: %v", r)
+})
+```
+
+### Content-Based Routing
+
+```go
+multiPub := azservicebus.NewMultiPublisher(client, azservicebus.MultiPublisherConfig{})
+defer multiPub.Close()
+
+router := func(msg *message.Message[[]byte]) string {
+    if priority, ok := msg.Properties().Get("priority"); ok && priority == "high" {
+        return "high-priority-queue"
+    }
+    return "standard-queue"
+}
+
+done, _ := multiPub.Publish(ctx, msgs, router)
+<-done
+```
+
+### Multi-Source Subscription
+
+```go
+multiSub := azservicebus.NewMultiSubscriber(client, azservicebus.MultiSubscriberConfig{})
+defer multiSub.Close()
+
+msgs, _ := multiSub.Subscribe(ctx, "queue-1", "queue-2", "topic/subscription")
+
+for msg := range msgs {
+    // Messages from any source
+    msg.Ack()
 }
 ```
 
 ## Local Development with Emulator
-
-The project includes Docker Compose configuration for running the Azure Service Bus emulator locally.
 
 ### Prerequisites
 
@@ -71,7 +155,7 @@ The project includes Docker Compose configuration for running the Azure Service 
 make emulator-start
 ```
 
-See [EMULATOR.md](EMULATOR.md) for detailed emulator setup instructions and troubleshooting.
+See [EMULATOR.md](EMULATOR.md) for detailed setup instructions.
 
 ### Run Tests
 
@@ -79,7 +163,7 @@ See [EMULATOR.md](EMULATOR.md) for detailed emulator setup instructions and trou
 # All tests
 make test
 
-# Integration tests only (requires emulator)
+# Integration tests only (requires emulator or Azure)
 make test-integration
 
 # Unit tests only
@@ -92,50 +176,69 @@ make test-unit
 
 ```go
 config := azservicebus.PublisherConfig{
-    PublishTimeout:      30 * time.Second,  // Timeout for publish operations
-    CloseTimeout:        30 * time.Second,  // Timeout for closing senders
-    ShutdownTimeout:     60 * time.Second,  // Maximum graceful shutdown time
-    BatchMaxSize:        1,                 // Messages per batch
-    BatchMaxDuration:    0,                 // Batch wait time
-    MarshalFunc:         json.Marshal,      // Custom marshaler
+    BatchSize:    10,              // Messages per batch
+    BatchTimeout: 100*time.Millisecond, // Max wait for batch
+    SendTimeout:  30*time.Second,  // Timeout for send operations
+    CloseTimeout: 30*time.Second,  // Timeout for closing
 }
+```
 
-publisher := azservicebus.NewPublisher(client, config)
+### Subscriber Configuration
+
+```go
+config := azservicebus.SubscriberConfig{
+    ReceiveTimeout:  30*time.Second, // Timeout for receive
+    AckTimeout:      30*time.Second, // Timeout for ack/nack
+    CloseTimeout:    30*time.Second, // Timeout for closing
+    MaxMessageCount: 10,             // Messages per batch
+    BufferSize:      100,            // Output channel buffer
+    PollInterval:    time.Second,    // Polling interval
+}
 ```
 
 ### Authentication
 
-The library supports two authentication methods:
-
 ```go
-// Connection string (for development/testing)
+// Connection string (development)
 client, err := azservicebus.NewClient("Endpoint=sb://...")
 
-// DefaultAzureCredential (recommended for production)
+// DefaultAzureCredential (production)
 client, err := azservicebus.NewClient("your-namespace.servicebus.windows.net")
+
+// With custom retry config
+client, err := azservicebus.NewClientWithConfig(connStr, azservicebus.ClientConfig{
+    MaxRetries:    5,
+    RetryDelay:    time.Second,
+    MaxRetryDelay: 60*time.Second,
+})
 ```
 
-## Message Metadata
+## Message Properties
 
-Gopipe message properties are automatically mapped to Azure Service Bus message properties:
-
-- `message_id` → MessageID
-- `subject` → Subject
-- `correlation_id` → CorrelationID
-- `content_type` → ContentType
-- `to` → To
-- `reply_to` → ReplyTo
-- `session_id` → SessionID
-- All other properties → ApplicationProperties
+Message properties are automatically mapped between gopipe and Azure Service Bus:
 
 ```go
-msg.Properties().Set("message_id", "abc123")
-msg.Properties().Set("custom_field", "value")
+msg := message.New(body,
+    message.WithID[[]byte]("id-123"),
+    message.WithCorrelationID[[]byte]("corr-456"),
+    message.WithSubject[[]byte]("order.created"),
+    message.WithContentType[[]byte]("application/json"),
+    message.WithTTL[[]byte](1*time.Hour),
+    message.WithProperty[[]byte]("custom", "value"),
+)
 ```
 
-## Architecture
+| gopipe Property | Azure Service Bus |
+|-----------------|-------------------|
+| ID | MessageID |
+| CorrelationID | CorrelationID |
+| Subject | Subject |
+| ContentType | ContentType |
+| ReplyTo | ReplyTo |
+| TTL | TimeToLive |
+| Custom properties | ApplicationProperties |
 
-This library follows the adapter pattern to integrate Azure Service Bus with gopipe:
+## Architecture
 
 ```
 gopipe Pipeline → Publisher → Azure Service Bus → Subscriber → gopipe Pipeline
@@ -144,11 +247,26 @@ gopipe Pipeline → Publisher → Azure Service Bus → Subscriber → gopipe Pi
 ### Key Components
 
 - **Client**: Manages connection to Azure Service Bus
-- **Publisher**: Implements gopipe publisher interface for sending messages
-- **Message Transform**: Converts between gopipe and Azure Service Bus message formats
-- **Batch Processing**: Groups messages for efficient sending
+- **Publisher/Subscriber**: Channel-based high-level API
+- **Sender/Receiver**: Low-level batch operations
+- **MultiPublisher/MultiSubscriber**: Multi-destination/source support
 
-## Development Commands
+## Documentation
+
+- [Getting Started](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
+- [API Reference](docs/api-reference.md)
+- [Emulator Setup](EMULATOR.md)
+
+## Examples
+
+See the [examples](examples/) directory:
+
+- [Basic Publish/Subscribe](examples/basic/)
+- [Pipeline Integration](examples/pipeline/)
+- [Reliability Patterns](examples/reliability/)
+
+## Development
 
 ```bash
 # Format code
@@ -165,16 +283,13 @@ make tidy
 
 # Build
 make build
-
-# Clean up
-make clean
 ```
 
 ## Known Issues
 
 ### macOS Emulator DNS Issues
 
-The Azure Service Bus emulator may experience DNS resolution issues on macOS, particularly with Apple Silicon. The emulator may show as "unhealthy" but still function correctly. See [EMULATOR.md](EMULATOR.md) for workarounds.
+The Azure Service Bus emulator may experience DNS resolution issues on macOS. See [EMULATOR.md](EMULATOR.md) for workarounds.
 
 ## Contributing
 
@@ -186,7 +301,7 @@ The Azure Service Bus emulator may experience DNS resolution issues on macOS, pa
 
 ## License
 
-See [LICENSE](LICENSE) file for details.
+See [LICENSE](LICENSE) file.
 
 ## Resources
 
