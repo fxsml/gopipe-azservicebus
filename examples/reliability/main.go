@@ -90,17 +90,15 @@ func main() {
 
 func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueName string) error {
 	// ========================================
-	// Publish tasks
+	// Publish tasks using Sender
 	// ========================================
 
 	log.Println("=== Publishing Tasks ===")
 
-	publisher := servicebus.NewPublisher(client, servicebus.PublisherConfig{
-		BatchSize:    10,
-		BatchTimeout: 100 * time.Millisecond,
-		SendTimeout:  30 * time.Second,
+	sender := servicebus.NewSender(client, servicebus.SenderConfig{
+		SendTimeout: 30 * time.Second,
 	})
-	defer publisher.Close()
+	defer sender.Close()
 
 	// Create tasks with different characteristics
 	tasks := []Task{
@@ -121,32 +119,29 @@ func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueN
 		)
 	}
 
-	if err := publisher.PublishSync(ctx, queueName, msgs); err != nil {
-		return fmt.Errorf("failed to publish tasks: %w", err)
+	if err := sender.Send(ctx, queueName, msgs); err != nil {
+		return fmt.Errorf("failed to send tasks: %w", err)
 	}
 	log.Printf("Published %d tasks", len(tasks))
 
 	time.Sleep(1 * time.Second)
 
 	// ========================================
-	// Process tasks with reliability
+	// Process tasks with reliability using gopipe
 	// ========================================
 
 	log.Println("\n=== Processing Tasks with Retry Logic ===")
 
-	subscriber := servicebus.NewSubscriber(client, servicebus.SubscriberConfig{
+	receiver := servicebus.NewReceiver(client, servicebus.ReceiverConfig{
 		ReceiveTimeout:  10 * time.Second,
 		AckTimeout:      30 * time.Second,
 		MaxMessageCount: 5,
-		BufferSize:      50,
-		PollInterval:    1 * time.Second,
 	})
-	defer subscriber.Close()
+	defer receiver.Close()
 
-	incomingMsgs, err := subscriber.Subscribe(ctx, queueName)
-	if err != nil {
-		return fmt.Errorf("failed to subscribe: %w", err)
-	}
+	// Create generator for receiving messages
+	generator := servicebus.NewMessageGenerator(receiver, queueName)
+	incomingMsgs := generator.Generate(ctx)
 
 	// Statistics
 	var processed, succeeded, failed atomic.Int32
@@ -168,12 +163,12 @@ func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueN
 			if err != nil {
 				if errors.Is(err, ErrTransient) && task.Retryable {
 					// Transient error - nack to retry
-					log.Printf("⚠️  Task %s: transient error, will retry", task.ID)
+					log.Printf("Task %s: transient error, will retry", task.ID)
 					msg.Nack(err)
 					return "", err
 				}
 				// Permanent error - acknowledge but log failure
-				log.Printf("❌ Task %s: permanent failure: %v", task.ID, err)
+				log.Printf("Task %s: permanent failure: %v", task.ID, err)
 				msg.Ack() // Ack to prevent infinite retry
 				failed.Add(1)
 				return "", err
@@ -182,7 +177,7 @@ func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueN
 			// Success - acknowledge
 			msg.Ack()
 			succeeded.Add(1)
-			log.Printf("✅ Task %s: %s", task.ID, result)
+			log.Printf("Task %s: %s", task.ID, result)
 			return result, nil
 		},
 		gopipe.WithConcurrency[*message.Message[[]byte], string](2),
@@ -196,21 +191,8 @@ func runReliabilityDemo(ctx context.Context, client *azservicebus.Client, queueN
 		}),
 	)
 
-	// Create input channel for processor
-	processInput := make(chan *message.Message[[]byte], 20)
-	go func() {
-		defer close(processInput)
-		for msg := range incomingMsgs {
-			select {
-			case processInput <- msg:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
 	// Start processing
-	results := processPipe.Start(ctx, processInput)
+	results := processPipe.Start(ctx, incomingMsgs)
 
 	// Collect results
 	timeout := time.After(30 * time.Second)

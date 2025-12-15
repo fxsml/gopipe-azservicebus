@@ -3,8 +3,8 @@
 // This example shows:
 // - Using gopipe's Generator, Processor, and Sink patterns
 // - Message transformation through pipeline stages
-// - Content-based routing to different queues
-// - Multi-subscriber for merging messages from multiple sources
+// - Content-based routing to different queues using Sender
+// - Receiving from multiple sources using Fan-In pattern
 // - Proper error handling and retries
 //
 // Prerequisites:
@@ -13,12 +13,12 @@
 //
 // Architecture:
 //
-//	[Order Generator] -> [Validation] -> [Router] -> [high-value-orders]
-//	                                             -> [standard-orders]
+//	[Order Generator] -> [Validation] -> [Router/Sender] -> [high-value-orders]
+//	                                                     -> [standard-orders]
 //
-//	[MultiSubscriber] <- [high-value-orders]
-//	                  <- [standard-orders]
-//	                  -> [Order Processor] -> [Notification Sink]
+//	[Fan-In Receivers] <- [high-value-orders]
+//	                   <- [standard-orders]
+//	                   -> [Order Processor] -> [Notification Sink]
 package main
 
 import (
@@ -99,19 +99,16 @@ func main() {
 
 func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 	// ========================================
-	// PART 1: Publishing Pipeline
+	// PART 1: Publishing Pipeline with Routing
 	// ========================================
 
 	log.Println("=== Starting Publishing Pipeline ===")
 
-	// Create multi-publisher for routing
-	multiPub := servicebus.NewMultiPublisher(client, servicebus.MultiPublisherConfig{
-		PublisherConfig: servicebus.PublisherConfig{
-			BatchSize:    5,
-			BatchTimeout: 100 * time.Millisecond,
-		},
+	// Create sender for routing to multiple destinations
+	sender := servicebus.NewSender(client, servicebus.SenderConfig{
+		SendTimeout: 30 * time.Second,
 	})
-	defer multiPub.Close()
+	defer sender.Close()
 
 	// Generate sample orders using gopipe channel utilities
 	orders := []Order{
@@ -158,77 +155,61 @@ func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 
 	validatedMsgs := validationPipe.Start(ctx, orderChan)
 
-	// Create buffered channel for multi-publisher
-	pubMsgs := make(chan *message.Message[[]byte], 10)
-	go func() {
-		defer close(pubMsgs)
-		for msg := range validatedMsgs {
-			select {
-			case pubMsgs <- msg:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	// Router function - route based on order amount
-	router := func(msg *message.Message[[]byte]) string {
+	// Route messages based on amount
+	for msg := range validatedMsgs {
+		// Determine target queue based on amount
+		targetQueue := standardQueue
 		if amount, ok := msg.Properties().Get("amount"); ok {
 			if amt, ok := amount.(float64); ok && amt >= highValueThreshold {
-				return highValueQueue
+				targetQueue = highValueQueue
 			}
 		}
-		return standardQueue
+
+		// Send to appropriate queue
+		if err := sender.Send(ctx, targetQueue, []*message.Message[[]byte]{msg}); err != nil {
+			log.Printf("Failed to send order to %s: %v", targetQueue, err)
+			continue
+		}
+		log.Printf("Routed order to %s", targetQueue)
 	}
 
-	// Publish with routing
-	pubDone, err := multiPub.Publish(ctx, pubMsgs, router)
-	if err != nil {
-		return fmt.Errorf("failed to start multi-publishing: %w", err)
-	}
-
-	<-pubDone
 	log.Println("Publishing complete")
 
 	// Wait for messages to propagate
 	time.Sleep(2 * time.Second)
 
 	// ========================================
-	// PART 2: Subscription Pipeline
+	// PART 2: Subscription Pipeline using Fan-In
 	// ========================================
 
 	log.Println("\n=== Starting Subscription Pipeline ===")
 
-	// Create multi-subscriber for both queues
-	multiSub := servicebus.NewMultiSubscriber(client, servicebus.MultiSubscriberConfig{
-		SubscriberConfig: servicebus.SubscriberConfig{
-			ReceiveTimeout:  5 * time.Second,
-			MaxMessageCount: 10,
-			BufferSize:      50,
-			PollInterval:    500 * time.Millisecond,
-		},
-		MergeBufferSize: 100,
+	// Create receivers for both queues
+	highValueReceiver := servicebus.NewReceiver(client, servicebus.ReceiverConfig{
+		ReceiveTimeout:  5 * time.Second,
+		MaxMessageCount: 10,
 	})
-	defer multiSub.Close()
+	defer highValueReceiver.Close()
 
-	// Subscribe to both queues
-	incomingMsgs, err := multiSub.Subscribe(ctx, highValueQueue, standardQueue)
-	if err != nil {
-		return fmt.Errorf("failed to subscribe: %w", err)
-	}
+	standardReceiver := servicebus.NewReceiver(client, servicebus.ReceiverConfig{
+		ReceiveTimeout:  5 * time.Second,
+		MaxMessageCount: 10,
+	})
+	defer standardReceiver.Close()
 
-	// Create a channel for gopipe processing
-	processInput := make(chan *message.Message[[]byte], 50)
-	go func() {
-		defer close(processInput)
-		for msg := range incomingMsgs {
-			select {
-			case processInput <- msg:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	// Create generators for both queues
+	highValueGen := servicebus.NewMessageGenerator(highValueReceiver, highValueQueue)
+	standardGen := servicebus.NewMessageGenerator(standardReceiver, standardQueue)
+
+	// Start generators
+	highValueMsgs := highValueGen.Generate(ctx)
+	standardMsgs := standardGen.Generate(ctx)
+
+	// Merge using gopipe FanIn
+	fanIn := gopipe.NewFanIn[*message.Message[[]byte]](gopipe.FanInConfig{})
+	fanIn.Add(highValueMsgs)
+	fanIn.Add(standardMsgs)
+	incomingMsgs := fanIn.Start(ctx)
 
 	// Process orders
 	processPipe := gopipe.NewTransformPipe(
@@ -260,11 +241,11 @@ func runPipeline(ctx context.Context, client *azservicebus.Client) error {
 		gopipe.WithConcurrency[*message.Message[[]byte], ProcessedOrder](3),
 	)
 
-	processedOrders := processPipe.Start(ctx, processInput)
+	processedOrders := processPipe.Start(ctx, incomingMsgs)
 
 	// Sink - final notification/logging
 	notificationSink := channel.Sink(processedOrders, func(order ProcessedOrder) {
-		log.Printf("📦 Processed: %s | Customer: %s | Amount: $%.2f | Category: %s",
+		log.Printf("Processed: %s | Customer: %s | Amount: $%.2f | Category: %s",
 			order.ID, order.Customer, order.Amount, order.Category)
 	})
 

@@ -1,9 +1,9 @@
-// Package main demonstrates basic Azure Service Bus publish/subscribe using gopipe-azservicebus.
+// Package main demonstrates basic Azure Service Bus send/receive using gopipe-azservicebus.
 //
 // This example shows:
 // - Creating a client with connection string from environment
-// - Publishing messages using the Publisher
-// - Subscribing to messages using the Subscriber
+// - Sending messages using the Sender
+// - Receiving messages using the Receiver with gopipe Generator integration
 // - Proper message acknowledgment
 //
 // Prerequisites:
@@ -18,7 +18,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -75,37 +74,31 @@ func main() {
 
 	log.Printf("Connected to Azure Service Bus")
 
-	// Run publisher and subscriber
+	// Run sender and receiver demo
 	if err := runDemo(ctx, client, queueName); err != nil {
 		log.Fatalf("Demo failed: %v", err)
 	}
 }
 
 func runDemo(ctx context.Context, client *azservicebus.Client, queueName string) error {
-	// Create publisher
-	publisher := servicebus.NewPublisher(client, servicebus.PublisherConfig{
-		BatchSize:    5,
-		BatchTimeout: 100 * time.Millisecond,
-		SendTimeout:  30 * time.Second,
+	// Create sender
+	sender := servicebus.NewSender(client, servicebus.SenderConfig{
+		SendTimeout: 30 * time.Second,
 	})
-	defer publisher.Close()
+	defer sender.Close()
 
-	// Create subscriber
-	subscriber := servicebus.NewSubscriber(client, servicebus.SubscriberConfig{
+	// Create receiver
+	receiver := servicebus.NewReceiver(client, servicebus.ReceiverConfig{
 		ReceiveTimeout:  10 * time.Second,
 		MaxMessageCount: 10,
-		BufferSize:      100,
-		PollInterval:    1 * time.Second,
 	})
-	defer subscriber.Close()
+	defer receiver.Close()
 
-	// Start subscriber in background
-	msgs, err := subscriber.Subscribe(ctx, queueName)
-	if err != nil {
-		return fmt.Errorf("failed to subscribe: %w", err)
-	}
+	// Start receiver using gopipe Generator
+	generator := servicebus.NewMessageGenerator(receiver, queueName)
+	msgs := generator.Generate(ctx)
 
-	// Process received messages
+	// Process received messages in background
 	go func() {
 		for msg := range msgs {
 			var order Order
@@ -117,15 +110,17 @@ func runDemo(ctx context.Context, client *azservicebus.Client, queueName string)
 			log.Printf("Received order: ID=%s, Customer=%s, Amount=$%.2f", order.ID, order.Customer, order.Amount)
 			msg.Ack()
 		}
-		log.Println("Subscriber channel closed")
+		log.Println("Receiver channel closed")
 	}()
 
-	// Publish sample orders
+	// Send sample orders using gopipe SinkPipe
+	sinkPipe := servicebus.NewMessageSinkPipe(sender, queueName, 5, 100*time.Millisecond)
+
+	// Create message channel
 	pubMsgs := make(chan *message.Message[[]byte])
-	done, err := publisher.Publish(ctx, queueName, pubMsgs)
-	if err != nil {
-		return fmt.Errorf("failed to start publishing: %w", err)
-	}
+
+	// Start the sink pipeline
+	done := sinkPipe.Start(ctx, pubMsgs)
 
 	// Send sample orders
 	orders := []Order{
@@ -156,7 +151,8 @@ func runDemo(ctx context.Context, client *azservicebus.Client, queueName string)
 	}()
 
 	// Wait for publishing to complete
-	<-done
+	for range done {
+	}
 	log.Println("Publishing complete")
 
 	// Wait a bit for messages to be processed

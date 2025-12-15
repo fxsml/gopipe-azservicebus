@@ -4,13 +4,12 @@ Azure Service Bus integration for the [gopipe](https://github.com/fxsml/gopipe) 
 
 ## Features
 
-- **Publisher**: Publish messages from gopipe pipelines to Azure Service Bus queues and topics
-- **Subscriber**: Consume messages from Azure Service Bus and feed them into gopipe pipelines
-- **Multi-Destination Routing**: Route messages to different queues/topics based on content
-- **Multi-Source Subscription**: Merge messages from multiple sources into a single stream
+- **Sender**: Send messages to Azure Service Bus queues and topics
+- **Receiver**: Receive messages from Azure Service Bus queues and topic subscriptions
+- **gopipe Integration**: Helper functions for seamless integration with gopipe pipelines
 - **Message Mapping**: Automatic conversion between gopipe messages and Azure Service Bus messages
 - **Reliability**: Connection recovery, message acknowledgment, retry support
-- **Local Development**: Run tests against the Azure Service Bus emulator
+- **Multi-Destination**: Send to multiple destinations using a single Sender
 
 ## Installation
 
@@ -20,7 +19,7 @@ go get github.com/fxsml/gopipe-azservicebus
 
 ## Quick Start
 
-### Publishing Messages
+### Sending Messages
 
 ```go
 package main
@@ -33,27 +32,24 @@ import (
 
     azservicebus "github.com/fxsml/gopipe-azservicebus"
     "github.com/fxsml/gopipe/message"
-    "github.com/joho/godotenv"
 )
 
 func main() {
-    _ = godotenv.Load()
-
     client, err := azservicebus.NewClient(os.Getenv("AZURE_SERVICEBUS_CONNECTION_STRING"))
     if err != nil {
         log.Fatal(err)
     }
     defer client.Close(context.Background())
 
-    publisher := azservicebus.NewPublisher(client, azservicebus.PublisherConfig{})
-    defer publisher.Close()
+    sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+    defer sender.Close()
 
     // Create message
     body, _ := json.Marshal(map[string]string{"hello": "world"})
     msg := message.New(body, message.WithID[[]byte]("msg-001"))
 
-    // Publish
-    err = publisher.PublishSync(context.Background(), "my-queue", []*message.Message[[]byte]{msg})
+    // Send
+    err = sender.Send(context.Background(), "my-queue", []*message.Message[[]byte]{msg})
     if err != nil {
         log.Fatal(err)
     }
@@ -61,21 +57,21 @@ func main() {
 }
 ```
 
-### Subscribing to Messages
+### Receiving Messages
 
 ```go
-subscriber := azservicebus.NewSubscriber(client, azservicebus.SubscriberConfig{
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{
     ReceiveTimeout:  10 * time.Second,
     MaxMessageCount: 10,
 })
-defer subscriber.Close()
+defer receiver.Close()
 
-msgs, err := subscriber.Subscribe(ctx, "my-queue")
+msgs, err := receiver.Receive(ctx, "my-queue")
 if err != nil {
     log.Fatal(err)
 }
 
-for msg := range msgs {
+for _, msg := range msgs {
     var data map[string]string
     json.Unmarshal(msg.Payload(), &data)
     log.Printf("Received: %v", data)
@@ -88,11 +84,15 @@ for msg := range msgs {
 ```go
 import (
     "github.com/fxsml/gopipe"
-    "github.com/fxsml/gopipe/channel"
+    azservicebus "github.com/fxsml/gopipe-azservicebus"
 )
 
-// Subscribe to messages
-msgs, _ := subscriber.Subscribe(ctx, "my-queue")
+// Create receiver and generator
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+generator := azservicebus.NewMessageGenerator(receiver, "my-queue")
+
+// Start receiving messages
+msgs := generator.Generate(ctx)
 
 // Process with gopipe
 processPipe := gopipe.NewTransformPipe(
@@ -105,94 +105,107 @@ processPipe := gopipe.NewTransformPipe(
 )
 
 results := processPipe.Start(ctx, msgs)
+```
 
-<-channel.Sink(results, func(r Result) {
-    log.Printf("Processed: %v", r)
-})
+### Sending with gopipe Pipeline
+
+```go
+// Create sender and sink pipe
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+sinkPipe := azservicebus.NewMessageSinkPipe(sender, "my-queue", 10, 100*time.Millisecond)
+
+// Create input channel
+msgs := make(chan *message.Message[[]byte])
+
+// Start the pipeline
+done := sinkPipe.Start(ctx, msgs)
+
+// Send messages
+go func() {
+    defer close(msgs)
+    for _, order := range orders {
+        body, _ := json.Marshal(order)
+        msgs <- message.New(body)
+    }
+}()
+
+// Wait for completion
+for range done {}
 ```
 
 ### Content-Based Routing
 
 ```go
-multiPub := azservicebus.NewMultiPublisher(client, azservicebus.MultiPublisherConfig{})
-defer multiPub.Close()
-
-router := func(msg *message.Message[[]byte]) string {
-    if priority, ok := msg.Properties().Get("priority"); ok && priority == "high" {
-        return "high-priority-queue"
-    }
-    return "standard-queue"
-}
-
-done, _ := multiPub.Publish(ctx, msgs, router)
-<-done
-```
-
-### Multi-Source Subscription
-
-```go
-multiSub := azservicebus.NewMultiSubscriber(client, azservicebus.MultiSubscriberConfig{})
-defer multiSub.Close()
-
-msgs, _ := multiSub.Subscribe(ctx, "queue-1", "queue-2", "topic/subscription")
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+defer sender.Close()
 
 for msg := range msgs {
+    // Route based on message properties
+    targetQueue := "standard-queue"
+    if priority, ok := msg.Properties().Get("priority"); ok && priority == "high" {
+        targetQueue = "high-priority-queue"
+    }
+    sender.Send(ctx, targetQueue, []*message.Message[[]byte]{msg})
+}
+```
+
+### Multi-Source Subscription with Fan-In
+
+```go
+// Create receivers for multiple queues
+receiver1 := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+receiver2 := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+
+// Create generators
+gen1 := azservicebus.NewMessageGenerator(receiver1, "queue-1")
+gen2 := azservicebus.NewMessageGenerator(receiver2, "queue-2")
+
+// Merge using gopipe FanIn
+fanIn := gopipe.NewFanIn[*message.Message[[]byte]](gopipe.FanInConfig{})
+fanIn.Add(gen1.Generate(ctx))
+fanIn.Add(gen2.Generate(ctx))
+merged := fanIn.Start(ctx)
+
+for msg := range merged {
     // Messages from any source
     msg.Ack()
 }
 ```
 
-## Local Development with Emulator
-
-### Prerequisites
-
-- Docker Desktop for Mac (with Rosetta 2 support for Apple Silicon)
-- Go 1.24 or later
-
-### Start the Emulator
+## Testing
 
 ```bash
-make emulator-start
-```
-
-See [EMULATOR.md](EMULATOR.md) for detailed setup instructions.
-
-### Run Tests
-
-```bash
-# All tests
+# Run all tests (requires Azure Service Bus connection string)
 make test
 
-# Integration tests only (requires emulator or Azure)
-make test-integration
-
-# Unit tests only
+# Run unit tests only
 make test-unit
+
+# Run benchmarks
+make bench
 ```
+
+Set `AZURE_SERVICEBUS_CONNECTION_STRING` environment variable or create a `.env` file.
 
 ## Configuration
 
-### Publisher Configuration
+### Sender Configuration
 
 ```go
-config := azservicebus.PublisherConfig{
-    BatchSize:    10,              // Messages per batch
-    BatchTimeout: 100*time.Millisecond, // Max wait for batch
+config := azservicebus.SenderConfig{
     SendTimeout:  30*time.Second,  // Timeout for send operations
     CloseTimeout: 30*time.Second,  // Timeout for closing
 }
 ```
 
-### Subscriber Configuration
+### Receiver Configuration
 
 ```go
-config := azservicebus.SubscriberConfig{
+config := azservicebus.ReceiverConfig{
     ReceiveTimeout:  30*time.Second, // Timeout for receive
     AckTimeout:      30*time.Second, // Timeout for ack/nack
     CloseTimeout:    30*time.Second, // Timeout for closing
     MaxMessageCount: 10,             // Messages per batch
-    BufferSize:      100,            // Output channel buffer
-    PollInterval:    time.Second,    // Polling interval
 }
 ```
 
@@ -241,30 +254,31 @@ msg := message.New(body,
 ## Architecture
 
 ```
-gopipe Pipeline → Publisher → Azure Service Bus → Subscriber → gopipe Pipeline
+gopipe Pipeline → Sender → Azure Service Bus → Receiver → gopipe Pipeline
 ```
 
 ### Key Components
 
 - **Client**: Manages connection to Azure Service Bus
-- **Publisher/Subscriber**: Channel-based high-level API
-- **Sender/Receiver**: Low-level batch operations
-- **MultiPublisher/MultiSubscriber**: Multi-destination/source support
+- **Sender**: Low-level batch send operations with connection pooling
+- **Receiver**: Low-level batch receive operations with connection pooling
+- **NewMessageGenerator**: Creates a gopipe Generator from a Receiver
+- **NewMessageSinkPipe**: Creates a gopipe BatchPipe that sends messages via Sender
 
 ## Documentation
 
 - [Getting Started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
 - [API Reference](docs/api-reference.md)
-- [Emulator Setup](EMULATOR.md)
 
 ## Examples
 
 See the [examples](examples/) directory:
 
-- [Basic Publish/Subscribe](examples/basic/)
-- [Pipeline Integration](examples/pipeline/)
-- [Reliability Patterns](examples/reliability/)
+- [Basic Send/Receive](examples/basic/) - Simple sending and receiving with gopipe integration
+- [Sender Example](examples/sender/) - Direct sender usage
+- [Pipeline Integration](examples/pipeline/) - Full gopipe pipeline with routing
+- [Reliability Patterns](examples/reliability/) - Retry configuration and error handling
 
 ## Development
 
@@ -284,12 +298,6 @@ make tidy
 # Build
 make build
 ```
-
-## Known Issues
-
-### macOS Emulator DNS Issues
-
-The Azure Service Bus emulator may experience DNS resolution issues on macOS. See [EMULATOR.md](EMULATOR.md) for workarounds.
 
 ## Contributing
 

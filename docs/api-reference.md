@@ -55,228 +55,13 @@ type ClientConfig struct {
 
 ---
 
-## Publisher
+## Sender
 
-### NewPublisher
-
-Creates a new Azure Service Bus publisher.
-
-```go
-func NewPublisher(client *azservicebus.Client, config PublisherConfig) *Publisher
-```
-
-**PublisherConfig:**
-```go
-type PublisherConfig struct {
-    BatchSize    int           // Default: 10
-    BatchTimeout time.Duration // Default: 100ms
-    SendTimeout  time.Duration // Default: 30s
-    CloseTimeout time.Duration // Default: 30s
-}
-```
-
-### Publisher.Publish
-
-Publishes messages from a channel asynchronously.
-
-```go
-func (p *Publisher) Publish(ctx context.Context, queueOrTopic string, msgs <-chan *message.Message[[]byte]) (<-chan struct{}, error)
-```
-
-**Parameters:**
-- `ctx` - Context for cancellation
-- `queueOrTopic` - Destination queue or topic name
-- `msgs` - Input channel of messages
-
-**Returns:**
-- Done channel (closed when all messages sent)
-- Error if publish fails to start
-
-**Example:**
-```go
-msgs := make(chan *message.Message[[]byte])
-done, err := publisher.Publish(ctx, "my-queue", msgs)
-
-go func() {
-    defer close(msgs)
-    msgs <- message.New([]byte("hello"))
-}()
-
-<-done // Wait for completion
-```
-
-### Publisher.PublishSync
-
-Publishes messages synchronously.
-
-```go
-func (p *Publisher) PublishSync(ctx context.Context, queueOrTopic string, msgs []*message.Message[[]byte]) error
-```
-
-### Publisher.Close
-
-Closes the publisher and releases resources.
-
-```go
-func (p *Publisher) Close() error
-```
-
----
-
-## Subscriber
-
-### NewSubscriber
-
-Creates a new Azure Service Bus subscriber.
-
-```go
-func NewSubscriber(client *azservicebus.Client, config SubscriberConfig) *Subscriber
-```
-
-**SubscriberConfig:**
-```go
-type SubscriberConfig struct {
-    ReceiveTimeout  time.Duration // Default: 30s
-    AckTimeout      time.Duration // Default: 30s
-    CloseTimeout    time.Duration // Default: 30s
-    MaxMessageCount int           // Default: 10
-    BufferSize      int           // Default: 100
-    PollInterval    time.Duration // Default: 1s
-}
-```
-
-### Subscriber.Subscribe
-
-Subscribes to messages from a queue or topic subscription.
-
-```go
-func (s *Subscriber) Subscribe(ctx context.Context, queueOrTopic string) (<-chan *message.Message[[]byte], error)
-```
-
-**Parameters:**
-- `ctx` - Context for cancellation
-- `queueOrTopic` - Queue name or "topic/subscription" format
-
-**Returns:**
-- Output channel of messages
-- Error if subscription fails
-
-**Example:**
-```go
-// Queue
-msgs, err := subscriber.Subscribe(ctx, "my-queue")
-
-// Topic subscription
-msgs, err := subscriber.Subscribe(ctx, "my-topic/my-subscription")
-
-for msg := range msgs {
-    // Process
-    msg.Ack()
-}
-```
-
-### Subscriber.Close
-
-Closes the subscriber and releases resources.
-
-```go
-func (s *Subscriber) Close() error
-```
-
----
-
-## MultiPublisher
-
-### NewMultiPublisher
-
-Creates a publisher that can route to multiple destinations.
-
-```go
-func NewMultiPublisher(client *azservicebus.Client, config MultiPublisherConfig) *MultiPublisher
-```
-
-**MultiPublisherConfig:**
-```go
-type MultiPublisherConfig struct {
-    PublisherConfig
-    Concurrency int // Default: 1
-}
-```
-
-### MultiPublisher.Publish
-
-Publishes messages with custom routing.
-
-```go
-func (mp *MultiPublisher) Publish(
-    ctx context.Context,
-    msgs <-chan *message.Message[[]byte],
-    router func(*message.Message[[]byte]) string,
-) (<-chan struct{}, error)
-```
-
-**Parameters:**
-- `ctx` - Context for cancellation
-- `msgs` - Input channel of messages
-- `router` - Function that returns destination for each message
-
-**Example:**
-```go
-router := func(msg *message.Message[[]byte]) string {
-    if val, ok := msg.Properties().Get("priority"); ok && val == "high" {
-        return "high-priority-queue"
-    }
-    return "standard-queue"
-}
-
-done, err := multiPub.Publish(ctx, msgs, router)
-```
-
----
-
-## MultiSubscriber
-
-### NewMultiSubscriber
-
-Creates a subscriber for multiple sources.
-
-```go
-func NewMultiSubscriber(client *azservicebus.Client, config MultiSubscriberConfig) *MultiSubscriber
-```
-
-**MultiSubscriberConfig:**
-```go
-type MultiSubscriberConfig struct {
-    SubscriberConfig
-    MergeBufferSize int // Default: 1000
-}
-```
-
-### MultiSubscriber.Subscribe
-
-Subscribes to multiple sources with a single output channel.
-
-```go
-func (ms *MultiSubscriber) Subscribe(ctx context.Context, queuesOrTopics ...string) (<-chan *message.Message[[]byte], error)
-```
-
-**Example:**
-```go
-msgs, err := multiSub.Subscribe(ctx, "queue-1", "queue-2", "topic/subscription")
-
-for msg := range msgs {
-    // Messages from any source
-    msg.Ack()
-}
-```
-
----
-
-## Sender (Low-Level)
+The Sender provides low-level batch send operations with connection pooling to multiple destinations.
 
 ### NewSender
 
-Creates a low-level sender.
+Creates a new Azure Service Bus sender.
 
 ```go
 func NewSender(client *azservicebus.Client, config SenderConfig) *Sender
@@ -292,19 +77,50 @@ type SenderConfig struct {
 
 ### Sender.Send
 
-Sends a batch of messages.
+Sends a batch of messages to a queue or topic.
 
 ```go
 func (s *Sender) Send(ctx context.Context, queueOrTopic string, msgs []*message.Message[[]byte]) error
 ```
 
+**Parameters:**
+- `ctx` - Context for cancellation
+- `queueOrTopic` - Destination queue or topic name
+- `msgs` - Slice of messages to send
+
+**Returns:**
+- Error if send fails
+
+**Example:**
+```go
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+defer sender.Close()
+
+msgs := []*message.Message[[]byte]{
+    message.New([]byte("message 1")),
+    message.New([]byte("message 2")),
+}
+
+err := sender.Send(ctx, "my-queue", msgs)
+```
+
+### Sender.Close
+
+Closes the sender and releases resources.
+
+```go
+func (s *Sender) Close() error
+```
+
 ---
 
-## Receiver (Low-Level)
+## Receiver
+
+The Receiver provides low-level batch receive operations with connection pooling.
 
 ### NewReceiver
 
-Creates a low-level receiver.
+Creates a new Azure Service Bus receiver.
 
 ```go
 func NewReceiver(client *azservicebus.Client, config ReceiverConfig) *Receiver
@@ -322,10 +138,159 @@ type ReceiverConfig struct {
 
 ### Receiver.Receive
 
-Receives a batch of messages.
+Receives a batch of messages from a queue or topic subscription.
 
 ```go
 func (r *Receiver) Receive(ctx context.Context, queueOrTopic string) ([]*message.Message[[]byte], error)
+```
+
+**Parameters:**
+- `ctx` - Context for cancellation
+- `queueOrTopic` - Queue name or "topic/subscription" format
+
+**Returns:**
+- Slice of received messages
+- Error if receive fails
+
+**Example:**
+```go
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{
+    MaxMessageCount: 10,
+})
+defer receiver.Close()
+
+// From a queue
+msgs, err := receiver.Receive(ctx, "my-queue")
+
+// From a topic subscription
+msgs, err := receiver.Receive(ctx, "my-topic/my-subscription")
+
+for _, msg := range msgs {
+    // Process message
+    msg.Ack()
+}
+```
+
+### Receiver.Close
+
+Closes the receiver and releases resources.
+
+```go
+func (r *Receiver) Close() error
+```
+
+---
+
+## gopipe Integration Helpers
+
+### NewMessageGenerator
+
+Creates a gopipe Generator that produces messages from the Receiver.
+
+```go
+func NewMessageGenerator(receiver *Receiver, queueOrTopic string, opts ...gopipe.Option[struct{}, *message.Message[[]byte]]) gopipe.Generator[*message.Message[[]byte]]
+```
+
+**Parameters:**
+- `receiver` - The Receiver to use for fetching messages
+- `queueOrTopic` - Queue name or "topic/subscription" format
+- `opts` - Optional gopipe Generator options
+
+**Returns:**
+- A gopipe Generator that produces messages
+
+**Example:**
+```go
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+generator := azservicebus.NewMessageGenerator(receiver, "my-queue")
+
+msgs := generator.Generate(ctx)
+for msg := range msgs {
+    // Process message
+    msg.Ack()
+}
+```
+
+### NewMessageSinkPipe
+
+Creates a gopipe Pipe that sends messages using the Sender.
+
+```go
+func NewMessageSinkPipe(sender *Sender, queueOrTopic string, batchSize int, batchTimeout time.Duration, opts ...gopipe.Option[[]*message.Message[[]byte], struct{}]) gopipe.Pipe[*message.Message[[]byte], struct{}]
+```
+
+**Parameters:**
+- `sender` - The Sender to use for sending messages
+- `queueOrTopic` - Destination queue or topic name
+- `batchSize` - Number of messages per batch
+- `batchTimeout` - Maximum time to wait for a full batch
+- `opts` - Optional gopipe Pipe options
+
+**Returns:**
+- A gopipe Pipe that batches and sends messages
+
+**Example:**
+```go
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+sinkPipe := azservicebus.NewMessageSinkPipe(sender, "my-queue", 10, 100*time.Millisecond)
+
+msgs := make(chan *message.Message[[]byte])
+done := sinkPipe.Start(ctx, msgs)
+
+// Send messages
+go func() {
+    defer close(msgs)
+    msgs <- message.New([]byte("hello"))
+}()
+
+// Wait for completion
+for range done {}
+```
+
+### NewMessageTransformSink
+
+Creates a gopipe Pipe that transforms and sends messages.
+
+```go
+func NewMessageTransformSink[In any](
+    sender *Sender,
+    queueOrTopic string,
+    batchSize int,
+    batchTimeout time.Duration,
+    transform func(context.Context, In) (*message.Message[[]byte], error),
+    opts ...gopipe.Option[In, struct{}],
+) gopipe.Pipe[In, struct{}]
+```
+
+**Parameters:**
+- `sender` - The Sender to use for sending messages
+- `queueOrTopic` - Destination queue or topic name
+- `batchSize` - Number of messages per batch
+- `batchTimeout` - Maximum time to wait for a full batch
+- `transform` - Function to transform input to a message
+- `opts` - Optional gopipe Pipe options
+
+**Example:**
+```go
+type Order struct {
+    ID     string
+    Amount float64
+}
+
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+sinkPipe := azservicebus.NewMessageTransformSink(
+    sender, "orders-queue", 10, 100*time.Millisecond,
+    func(ctx context.Context, order Order) (*message.Message[[]byte], error) {
+        body, err := json.Marshal(order)
+        if err != nil {
+            return nil, err
+        }
+        return message.New(body, message.WithID[[]byte](order.ID)), nil
+    },
+)
+
+orders := make(chan Order)
+done := sinkPipe.Start(ctx, orders)
 ```
 
 ---
@@ -389,31 +354,11 @@ Internally calls `AbandonMessage` with error details. The message returns to the
 
 **Example:**
 ```go
-for msg := range msgs {
+for _, msg := range msgs {
     if err := process(msg); err != nil {
         msg.Nack(err) // Will be redelivered
         continue
     }
     msg.Ack() // Removed from queue
-}
-```
-
----
-
-## Errors
-
-### ErrSubscriberClosed
-
-Returned when attempting to subscribe with a closed subscriber.
-
-```go
-var ErrSubscriberClosed = newError("subscriber is closed")
-```
-
-**Example:**
-```go
-msgs, err := subscriber.Subscribe(ctx, "queue")
-if err == azservicebus.ErrSubscriberClosed {
-    // Handle closed subscriber
 }
 ```

@@ -53,7 +53,7 @@ func main() {
 }
 ```
 
-### 3. Publish Messages
+### 3. Send Messages
 
 ```go
 import (
@@ -61,56 +61,43 @@ import (
     "github.com/fxsml/gopipe/message"
 )
 
-// Create publisher
-publisher := azservicebus.NewPublisher(client, azservicebus.PublisherConfig{
-    BatchSize:    10,
-    BatchTimeout: 100 * time.Millisecond,
+// Create sender
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{
+    SendTimeout: 30 * time.Second,
 })
-defer publisher.Close()
+defer sender.Close()
 
-// Option 1: Channel-based (async)
-msgs := make(chan *message.Message[[]byte])
-done, err := publisher.Publish(ctx, "my-queue", msgs)
-if err != nil {
-    log.Fatal(err)
-}
-
-go func() {
-    defer close(msgs)
-    for i := 0; i < 10; i++ {
-        body, _ := json.Marshal(map[string]int{"id": i})
-        msgs <- message.New(body)
-    }
-}()
-
-<-done // Wait for completion
-
-// Option 2: Synchronous
+// Create messages
 messages := []*message.Message[[]byte]{
     message.New([]byte(`{"id": 1}`)),
     message.New([]byte(`{"id": 2}`)),
 }
-err = publisher.PublishSync(ctx, "my-queue", messages)
+
+// Send batch
+err = sender.Send(ctx, "my-queue", messages)
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
-### 4. Subscribe to Messages
+### 4. Receive Messages
 
 ```go
-// Create subscriber
-subscriber := azservicebus.NewSubscriber(client, azservicebus.SubscriberConfig{
+// Create receiver
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{
     ReceiveTimeout:  10 * time.Second,
     MaxMessageCount: 10,
 })
-defer subscriber.Close()
+defer receiver.Close()
 
-// Subscribe to queue
-msgs, err := subscriber.Subscribe(ctx, "my-queue")
+// Receive from queue
+msgs, err := receiver.Receive(ctx, "my-queue")
 if err != nil {
     log.Fatal(err)
 }
 
 // Process messages
-for msg := range msgs {
+for _, msg := range msgs {
     var data map[string]int
     if err := json.Unmarshal(msg.Payload(), &data); err != nil {
         msg.Nack(err)
@@ -125,27 +112,55 @@ for msg := range msgs {
 ### 5. Using with Topics
 
 ```go
-// Publish to topic
-err = publisher.PublishSync(ctx, "my-topic", messages)
+// Send to topic
+err = sender.Send(ctx, "my-topic", messages)
 
-// Subscribe to topic subscription
+// Receive from topic subscription
 // Format: "topic-name/subscription-name"
-msgs, err := subscriber.Subscribe(ctx, "my-topic/my-subscription")
+msgs, err := receiver.Receive(ctx, "my-topic/my-subscription")
 ```
 
-## Basic Examples
+## Using with gopipe
 
-### Publishing with Properties
+### Continuous Receiving with Generator
 
 ```go
-msg := message.New(body,
-    message.WithID[[]byte]("unique-id"),
-    message.WithCorrelationID[[]byte]("correlation-123"),
-    message.WithSubject[[]byte]("order.created"),
-    message.WithContentType[[]byte]("application/json"),
-    message.WithProperty[[]byte]("custom_field", "value"),
-    message.WithTTL[[]byte](1 * time.Hour),
-)
+// Create receiver and generator
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+generator := azservicebus.NewMessageGenerator(receiver, "my-queue")
+
+// Start receiving (continuous)
+msgs := generator.Generate(ctx)
+
+// Process messages
+for msg := range msgs {
+    // Process
+    msg.Ack()
+}
+```
+
+### Sending with SinkPipe
+
+```go
+// Create sender and sink pipe
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+sinkPipe := azservicebus.NewMessageSinkPipe(sender, "my-queue", 10, 100*time.Millisecond)
+
+// Create message channel
+msgs := make(chan *message.Message[[]byte])
+done := sinkPipe.Start(ctx, msgs)
+
+// Send messages
+go func() {
+    defer close(msgs)
+    for i := 0; i < 10; i++ {
+        body, _ := json.Marshal(map[string]int{"id": i})
+        msgs <- message.New(body)
+    }
+}()
+
+// Wait for completion
+for range done {}
 ```
 
 ### Processing Pipeline
@@ -156,8 +171,12 @@ import (
     "github.com/fxsml/gopipe/channel"
 )
 
-// Subscribe
-msgs, _ := subscriber.Subscribe(ctx, "my-queue")
+// Create receiver and generator
+receiver := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+generator := azservicebus.NewMessageGenerator(receiver, "my-queue")
+
+// Start receiving
+msgs := generator.Generate(ctx)
 
 // Transform
 transformPipe := gopipe.NewTransformPipe(
@@ -178,44 +197,55 @@ results := transformPipe.Start(ctx, msgs)
 })
 ```
 
+## Basic Examples
+
+### Sending with Properties
+
+```go
+msg := message.New(body,
+    message.WithID[[]byte]("unique-id"),
+    message.WithCorrelationID[[]byte]("correlation-123"),
+    message.WithSubject[[]byte]("order.created"),
+    message.WithContentType[[]byte]("application/json"),
+    message.WithProperty[[]byte]("custom_field", "value"),
+    message.WithTTL[[]byte](1 * time.Hour),
+)
+```
+
 ### Multi-Destination Routing
 
 ```go
-multiPub := azservicebus.NewMultiPublisher(client, azservicebus.MultiPublisherConfig{
-    PublisherConfig: azservicebus.PublisherConfig{
-        BatchSize: 10,
-    },
-})
-defer multiPub.Close()
-
-router := func(msg *message.Message[[]byte]) string {
-    if priority, ok := msg.Properties().Get("priority"); ok {
-        if priority == "high" {
-            return "high-priority-queue"
-        }
-    }
-    return "standard-queue"
-}
-
-done, _ := multiPub.Publish(ctx, msgs, router)
-<-done
-```
-
-### Multi-Source Subscription
-
-```go
-multiSub := azservicebus.NewMultiSubscriber(client, azservicebus.MultiSubscriberConfig{
-    SubscriberConfig: azservicebus.SubscriberConfig{
-        ReceiveTimeout:  10 * time.Second,
-        MaxMessageCount: 10,
-    },
-})
-defer multiSub.Close()
-
-// Subscribe to multiple sources
-msgs, _ := multiSub.Subscribe(ctx, "queue-1", "queue-2", "topic/subscription")
+sender := azservicebus.NewSender(client, azservicebus.SenderConfig{})
+defer sender.Close()
 
 for msg := range msgs {
+    // Route based on message properties
+    targetQueue := "standard-queue"
+    if priority, ok := msg.Properties().Get("priority"); ok && priority == "high" {
+        targetQueue = "high-priority-queue"
+    }
+    sender.Send(ctx, targetQueue, []*message.Message[[]byte]{msg})
+}
+```
+
+### Multi-Source Subscription with Fan-In
+
+```go
+// Create receivers for multiple queues
+receiver1 := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+receiver2 := azservicebus.NewReceiver(client, azservicebus.ReceiverConfig{})
+
+// Create generators
+gen1 := azservicebus.NewMessageGenerator(receiver1, "queue-1")
+gen2 := azservicebus.NewMessageGenerator(receiver2, "queue-2")
+
+// Merge using gopipe FanIn
+fanIn := gopipe.NewFanIn[*message.Message[[]byte]](gopipe.FanInConfig{})
+fanIn.Add(gen1.Generate(ctx))
+fanIn.Add(gen2.Generate(ctx))
+merged := fanIn.Start(ctx)
+
+for msg := range merged {
     // Messages from any source
     msg.Ack()
 }
@@ -243,7 +273,7 @@ client, err := azservicebus.NewClient("your-namespace.servicebus.windows.net")
 Use `Nack()` to return messages to the queue for retry:
 
 ```go
-for msg := range msgs {
+for _, msg := range msgs {
     if err := process(msg); err != nil {
         if isTransient(err) {
             msg.Nack(err) // Message returns to queue
@@ -286,8 +316,9 @@ go func() {
     cancel() // Triggers graceful shutdown
 }()
 
-// Subscriber will close channel when context is cancelled
-msgs, _ := subscriber.Subscribe(ctx, "queue")
+// Generator will close channel when context is cancelled
+generator := azservicebus.NewMessageGenerator(receiver, "queue")
+msgs := generator.Generate(ctx)
 
 for msg := range msgs {
     // Process
@@ -295,13 +326,13 @@ for msg := range msgs {
 }
 
 // Cleanup
-subscriber.Close()
-publisher.Close()
+receiver.Close()
+sender.Close()
 client.Close(context.Background())
 ```
 
 ## Next Steps
 
 - See [Architecture](architecture.md) for detailed component information
-- Check [examples/](../examples/) for complete working examples
-- Read [EMULATOR.md](../EMULATOR.md) for local development setup
+- Check [API Reference](api-reference.md) for complete API documentation
+- See [examples/](../examples/) for complete working examples
