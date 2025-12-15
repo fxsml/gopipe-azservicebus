@@ -317,6 +317,7 @@ gopipe Pipeline → Sender → Azure Service Bus → Receiver → gopipe Pipelin
 - [Getting Started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
 - [API Reference](docs/api-reference.md)
+- [Message Mapping Reference](docs/message-mapping.md) - CloudEvents and AMQP attribute mapping
 
 ## Examples
 

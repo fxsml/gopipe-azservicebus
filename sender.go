@@ -151,7 +151,9 @@ func (s *Sender) getOrCreateSender(queueOrTopic string) (*azservicebus.Sender, e
 	return sbSender, nil
 }
 
-// transformMessage transforms a gopipe Message to an Azure Service Bus Message
+// transformMessage transforms a gopipe Message to an Azure Service Bus Message.
+// This mapping aligns with CloudEvents semantics while using Azure Service Bus native properties.
+// See docs/message-mapping.md for the complete mapping reference.
 func (s *Sender) transformMessage(msg *message.Message) *azservicebus.Message {
 	// Use Data directly as body (it's already []byte)
 	body := msg.Data
@@ -164,29 +166,69 @@ func (s *Sender) transformMessage(msg *message.Message) *azservicebus.Message {
 
 	// Map attributes to Service Bus properties
 	for key, value := range msg.Attributes {
-		// Convert value to string if it's not already
-		strValue, ok := value.(string)
-		if !ok {
-			strValue = fmt.Sprintf("%v", value)
-		}
-
 		switch key {
+		// CloudEvents required attributes
 		case message.AttrID:
-			v := strValue
-			sbMsg.MessageID = &v
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.MessageID = &v
+			}
+		case message.AttrSource:
+			// CloudEvents source maps to ReplyTo (origin identifier)
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.ReplyTo = &v
+			}
+		case message.AttrType:
+			// CloudEvents type goes to application properties
+			sbMsg.ApplicationProperties[key] = value
+
+		// CloudEvents optional attributes
 		case message.AttrCorrelationID:
-			v := strValue
-			sbMsg.CorrelationID = &v
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.CorrelationID = &v
+			}
 		case message.AttrSubject:
-			v := strValue
-			sbMsg.Subject = &v
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.Subject = &v
+			}
 		case message.AttrDataContentType:
-			v := strValue
-			sbMsg.ContentType = &v
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.ContentType = &v
+			}
+
+		// Service Bus specific properties
+		case "to":
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.To = &v
+			}
+		case "replyTo":
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.ReplyTo = &v
+			}
+		case "sessionId":
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.SessionID = &v
+			}
+		case "replyToSessionId":
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.ReplyToSessionID = &v
+			}
+		case "partitionKey":
+			if v, ok := value.(string); ok && v != "" {
+				sbMsg.PartitionKey = &v
+			}
 		case "ttl":
 			if ttl, ok := value.(time.Duration); ok {
 				sbMsg.TimeToLive = &ttl
 			}
+		case "scheduledEnqueueTime":
+			if t, ok := value.(time.Time); ok {
+				sbMsg.ScheduledEnqueueTime = &t
+			}
+
+		// Skip internal/read-only attributes
+		case message.AttrTime, message.AttrTopic, "deliveryCount", "sequenceNumber", "lockedUntil", "enqueuedTime":
+			// These are read-only or internal, skip them
+
 		default:
 			// All other attributes go to application properties
 			sbMsg.ApplicationProperties[key] = value

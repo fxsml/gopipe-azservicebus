@@ -246,7 +246,9 @@ func (r *Receiver) recreateReceiver(queueOrTopic string) (*azservicebus.Receiver
 	return newSbReceiver, nil
 }
 
-// transformMessage transforms an Azure Service Bus ReceivedMessage to a gopipe Message
+// transformMessage transforms an Azure Service Bus ReceivedMessage to a gopipe Message.
+// This mapping aligns with CloudEvents semantics while preserving Azure Service Bus metadata.
+// See docs/message-mapping.md for the complete mapping reference.
 func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *azservicebus.ReceivedMessage) *message.Message {
 	// Use raw bytes as payload
 	payload := sbMsg.Body
@@ -254,24 +256,51 @@ func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *az
 	// Create attributes map for Service Bus metadata
 	attrs := make(message.Attributes)
 
-	// Map standard Service Bus properties to attributes
+	// Map CloudEvents required attributes
 	if sbMsg.MessageID != "" {
 		attrs[message.AttrID] = sbMsg.MessageID
 	}
-	if sbMsg.CorrelationID != nil {
+	if sbMsg.ReplyTo != nil && *sbMsg.ReplyTo != "" {
+		// ReplyTo maps to CloudEvents source (origin identifier)
+		attrs[message.AttrSource] = *sbMsg.ReplyTo
+	}
+	// CloudEvents type comes from application properties (if set)
+
+	// Map CloudEvents optional attributes
+	if sbMsg.CorrelationID != nil && *sbMsg.CorrelationID != "" {
 		attrs[message.AttrCorrelationID] = *sbMsg.CorrelationID
+	}
+	if sbMsg.Subject != nil && *sbMsg.Subject != "" {
+		attrs[message.AttrSubject] = *sbMsg.Subject
+	}
+	if sbMsg.ContentType != nil && *sbMsg.ContentType != "" {
+		attrs[message.AttrDataContentType] = *sbMsg.ContentType
 	}
 	if sbMsg.EnqueuedTime != nil {
 		attrs[message.AttrTime] = *sbMsg.EnqueuedTime
 	}
-	if sbMsg.Subject != nil {
-		attrs[message.AttrSubject] = *sbMsg.Subject
+
+	// Map Service Bus specific properties
+	if sbMsg.To != nil && *sbMsg.To != "" {
+		attrs["to"] = *sbMsg.To
 	}
-	if sbMsg.ContentType != nil {
-		attrs[message.AttrDataContentType] = *sbMsg.ContentType
+	if sbMsg.SessionID != nil && *sbMsg.SessionID != "" {
+		attrs["sessionId"] = *sbMsg.SessionID
+	}
+	if sbMsg.ReplyToSessionID != nil && *sbMsg.ReplyToSessionID != "" {
+		attrs["replyToSessionId"] = *sbMsg.ReplyToSessionID
+	}
+	if sbMsg.PartitionKey != nil && *sbMsg.PartitionKey != "" {
+		attrs["partitionKey"] = *sbMsg.PartitionKey
+	}
+	if sbMsg.TimeToLive != nil {
+		attrs["ttl"] = *sbMsg.TimeToLive
+	}
+	if sbMsg.ScheduledEnqueueTime != nil {
+		attrs["scheduledEnqueueTime"] = *sbMsg.ScheduledEnqueueTime
 	}
 
-	// Map additional Service Bus properties
+	// Map Service Bus read-only metadata
 	attrs["deliveryCount"] = int(sbMsg.DeliveryCount)
 	if sbMsg.LockedUntil != nil {
 		attrs["lockedUntil"] = *sbMsg.LockedUntil
@@ -279,17 +308,23 @@ func (r *Receiver) transformMessage(sbReceiver *azservicebus.Receiver, sbMsg *az
 	if sbMsg.SequenceNumber != nil {
 		attrs["sequenceNumber"] = *sbMsg.SequenceNumber
 	}
-	if sbMsg.PartitionKey != nil {
-		attrs["partitionKey"] = *sbMsg.PartitionKey
+	if sbMsg.EnqueuedSequenceNumber != nil {
+		attrs["enqueuedSequenceNumber"] = *sbMsg.EnqueuedSequenceNumber
 	}
-	if sbMsg.TimeToLive != nil {
-		attrs["ttl"] = *sbMsg.TimeToLive
+	if sbMsg.DeadLetterSource != nil && *sbMsg.DeadLetterSource != "" {
+		attrs["deadLetterSource"] = *sbMsg.DeadLetterSource
 	}
-	if sbMsg.ReplyTo != nil {
-		attrs["replyTo"] = *sbMsg.ReplyTo
+	if sbMsg.DeadLetterReason != nil && *sbMsg.DeadLetterReason != "" {
+		attrs["deadLetterReason"] = *sbMsg.DeadLetterReason
+	}
+	if sbMsg.DeadLetterErrorDescription != nil && *sbMsg.DeadLetterErrorDescription != "" {
+		attrs["deadLetterErrorDescription"] = *sbMsg.DeadLetterErrorDescription
+	}
+	if sbMsg.State != 0 {
+		attrs["state"] = int(sbMsg.State)
 	}
 
-	// Map application properties
+	// Map application properties (includes CloudEvents type and other custom attributes)
 	for key, value := range sbMsg.ApplicationProperties {
 		attrs[key] = value
 	}
