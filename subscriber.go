@@ -56,6 +56,52 @@ type SubscriberConfig struct {
 	// DisableLockRenewal disables automatic lock renewal.
 	// Use only for short-processing scenarios where lock never expires.
 	DisableLockRenewal bool
+
+	// Properties maps Azure Service Bus broker properties onto the received message.
+	// Each field is a function receiving the broker property value and the message to mutate.
+	// Nil functions and nil broker property fields are skipped.
+	Properties SubscriberProperties
+}
+
+// SubscriberProperties holds per-field mapping functions from Azure Service Bus broker
+// properties to the received gopipe message. Functions receive the dereferenced property
+// value and a mutable *message.RawMessage and may write to msg.Attributes freely.
+type SubscriberProperties struct {
+	SessionID            func(string, *message.RawMessage)
+	ReplyTo              func(string, *message.RawMessage)
+	ReplyToSessionID     func(string, *message.RawMessage)
+	To                   func(string, *message.RawMessage)
+	Subject              func(string, *message.RawMessage)
+	PartitionKey         func(string, *message.RawMessage)
+	TimeToLive           func(time.Duration, *message.RawMessage)
+	ScheduledEnqueueTime func(time.Time, *message.RawMessage)
+}
+
+func (sp SubscriberProperties) apply(sbMsg *azservicebus.ReceivedMessage, msg *message.RawMessage) {
+	if sp.SessionID != nil && sbMsg.SessionID != nil {
+		sp.SessionID(*sbMsg.SessionID, msg)
+	}
+	if sp.ReplyTo != nil && sbMsg.ReplyTo != nil {
+		sp.ReplyTo(*sbMsg.ReplyTo, msg)
+	}
+	if sp.ReplyToSessionID != nil && sbMsg.ReplyToSessionID != nil {
+		sp.ReplyToSessionID(*sbMsg.ReplyToSessionID, msg)
+	}
+	if sp.To != nil && sbMsg.To != nil {
+		sp.To(*sbMsg.To, msg)
+	}
+	if sp.Subject != nil && sbMsg.Subject != nil {
+		sp.Subject(*sbMsg.Subject, msg)
+	}
+	if sp.PartitionKey != nil && sbMsg.PartitionKey != nil {
+		sp.PartitionKey(*sbMsg.PartitionKey, msg)
+	}
+	if sp.TimeToLive != nil && sbMsg.TimeToLive != nil {
+		sp.TimeToLive(*sbMsg.TimeToLive, msg)
+	}
+	if sp.ScheduledEnqueueTime != nil && sbMsg.ScheduledEnqueueTime != nil {
+		sp.ScheduledEnqueueTime(*sbMsg.ScheduledEnqueueTime, msg)
+	}
 }
 
 func (c SubscriberConfig) withDefaults() SubscriberConfig {
@@ -291,14 +337,15 @@ func (s *Subscriber) newHandler(
 		msgChan:     msgChan,
 
 		// Subscriber-level config (constant per subscriber)
-		logger:             s.logger,
-		topic:              s.topic,
-		pipeline:           pipeline,
-		renewalInterval:    s.config.LockRenewalInterval,
-		operationTimeout:   s.config.OperationTimeout,
-		disableLockRenewal: s.config.DisableLockRenewal,
-		inFlight:           s.inFlight,
-		abort:              abort,
+		logger:               s.logger,
+		topic:                s.topic,
+		pipeline:             pipeline,
+		renewalInterval:      s.config.LockRenewalInterval,
+		operationTimeout:     s.config.OperationTimeout,
+		disableLockRenewal:   s.config.DisableLockRenewal,
+		subscriberProperties: s.config.Properties,
+		inFlight:             s.inFlight,
+		abort:                abort,
 	}
 }
 
@@ -393,16 +440,6 @@ func (s *Subscriber) extractAttrs(sbMsg *azservicebus.ReceivedMessage) message.A
 		attrs[message.AttrCorrelationID] = *sbMsg.CorrelationID
 	}
 
-	// Expiry time: only use CloudEvents expirytime if present (business deadline).
-	// Do NOT include LockedUntil (changes with lock renewal) or GracePeriod (shutdown concern).
-	if ceExpiry, hasExpiry := attrs[message.AttrExpiryTime]; hasExpiry {
-		if expiryStr, ok := ceExpiry.(string); ok {
-			if parsed, err := time.Parse(time.RFC3339, expiryStr); err == nil {
-				attrs[message.AttrExpiryTime] = parsed
-			}
-		}
-	}
-
 	return attrs
 }
 
@@ -429,19 +466,20 @@ func getErrorCode(err error) string {
 // messageHandler handles a single message's lifecycle:
 // build → send to channel → renewal loop → settlement
 type messageHandler struct {
-	receiver           *azservicebus.Receiver
-	msg                *azservicebus.ReceivedMessage
-	attrs              message.Attributes
-	msgChan            chan<- *message.RawMessage
-	logger             *slog.Logger
-	topic              string
-	pipeline           string
-	renewalInterval    time.Duration // 0 = auto-detect
-	operationTimeout   time.Duration
-	disableLockRenewal bool
-	inFlight           *semaphore.Semaphore
-	receiveTime        time.Time
-	abort              <-chan struct{} // subscription abort signal (closed on timeout or Close())
+	receiver             *azservicebus.Receiver
+	msg                  *azservicebus.ReceivedMessage
+	attrs                message.Attributes
+	msgChan              chan<- *message.RawMessage
+	logger               *slog.Logger
+	topic                string
+	pipeline             string
+	renewalInterval      time.Duration // 0 = auto-detect
+	operationTimeout     time.Duration
+	disableLockRenewal   bool
+	subscriberProperties SubscriberProperties
+	inFlight             *semaphore.Semaphore
+	receiveTime          time.Time
+	abort                <-chan struct{} // subscription abort signal (closed on timeout or Close())
 }
 
 // msgType extracts the CloudEvents type from the message attributes.
@@ -466,6 +504,7 @@ func (h *messageHandler) handle() {
 		func(e error) { result <- e },
 	)
 	pipelineMsg := message.NewRaw(h.msg.Body, h.attrs, acking)
+	h.subscriberProperties.apply(h.msg, pipelineMsg)
 
 	// Measure channel send duration (backpressure indicator)
 	sendStart := time.Now()

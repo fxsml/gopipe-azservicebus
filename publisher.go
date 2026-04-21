@@ -48,6 +48,25 @@ type PublisherConfig struct {
 	// Worker is the number of concurrent workers for streaming Publish.
 	// Defaults to 10.
 	Worker int
+
+	// Properties controls Azure Service Bus broker-level message properties.
+	// Each field is a function receiving the outgoing message and returning the
+	// property value; a nil function or empty/zero return value leaves the field unset.
+	Properties PublisherProperties
+}
+
+// PublisherProperties holds per-field resolver functions for Azure Service Bus broker properties.
+// Resolvers receive the outgoing message so values can be derived statically or dynamically.
+// Nil functions and empty/zero return values are ignored.
+type PublisherProperties struct {
+	SessionID            func(*message.RawMessage) string
+	ReplyTo              func(*message.RawMessage) string
+	ReplyToSessionID     func(*message.RawMessage) string
+	To                   func(*message.RawMessage) string
+	Subject              func(*message.RawMessage) string
+	PartitionKey         func(*message.RawMessage) string
+	TimeToLive           func(*message.RawMessage) time.Duration
+	ScheduledEnqueueTime func(*message.RawMessage) time.Time
 }
 
 func (c PublisherConfig) withDefaults() PublisherConfig {
@@ -470,9 +489,53 @@ func (p *Publisher) toServiceBusMessage(msg *message.RawMessage) *azservicebus.M
 		sbMsg.CorrelationID = &corrID
 	}
 
-	if expiry := msg.ExpiryTime(); !expiry.IsZero() {
-		if ttl := time.Until(expiry); ttl > 0 {
-			sbMsg.TimeToLive = &ttl
+	pp := p.config.Properties
+	if pp.SessionID != nil {
+		v := pp.SessionID(msg)
+		if v != "" {
+			sbMsg.SessionID = &v
+		}
+	}
+	if pp.ReplyTo != nil {
+		v := pp.ReplyTo(msg)
+		if v != "" {
+			sbMsg.ReplyTo = &v
+		}
+	}
+	if pp.ReplyToSessionID != nil {
+		v := pp.ReplyToSessionID(msg)
+		if v != "" {
+			sbMsg.ReplyToSessionID = &v
+		}
+	}
+	if pp.To != nil {
+		v := pp.To(msg)
+		if v != "" {
+			sbMsg.To = &v
+		}
+	}
+	if pp.Subject != nil {
+		v := pp.Subject(msg)
+		if v != "" {
+			sbMsg.Subject = &v
+		}
+	}
+	if pp.PartitionKey != nil {
+		v := pp.PartitionKey(msg)
+		if v != "" {
+			sbMsg.PartitionKey = &v
+		}
+	}
+	if pp.TimeToLive != nil {
+		d := pp.TimeToLive(msg)
+		if d > 0 {
+			sbMsg.TimeToLive = &d
+		}
+	}
+	if pp.ScheduledEnqueueTime != nil {
+		t := pp.ScheduledEnqueueTime(msg)
+		if !t.IsZero() {
+			sbMsg.ScheduledEnqueueTime = &t
 		}
 	}
 

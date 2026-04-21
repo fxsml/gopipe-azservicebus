@@ -1,7 +1,6 @@
 package azservicebus_test
 
 import (
-	gosb "github.com/fxsml/gopipe-azservicebus"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	gosb "github.com/fxsml/gopipe-azservicebus"
 
 	"github.com/fxsml/gopipe/message"
 	"github.com/stretchr/testify/assert"
@@ -181,7 +181,7 @@ func TestSubscriber_NackAndRedelivery(t *testing.T) {
 	cancel()
 }
 
-func TestSubscriber_ExpiryTimePreserved(t *testing.T) {
+func TestSubscriber_TimeToLiveMapping(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -190,58 +190,45 @@ func TestSubscriber_ExpiryTimePreserved(t *testing.T) {
 
 	topicSub := fmt.Sprintf("%s/%s", topicName, subName)
 
-	// Create publisher and subscriber
-	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{})
+	ttl := 5 * time.Minute
+	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{
+		Properties: gosb.PublisherProperties{
+			TimeToLive: func(*message.RawMessage) time.Duration { return ttl },
+		},
+	})
 	require.NoError(t, err)
 	defer pub.Close()
 
-	sub, err := gosb.NewSubscriber(client, topicSub, "test", gosb.SubscriberConfig{})
-	require.NoError(t, err)
-
-	// Publish message with expirytime set to 10 seconds from now
-	expiry := time.Now().Add(10 * time.Second).Truncate(time.Second)
-	msgID := "expiry-test-msg"
-	msg := message.NewRaw(
-		[]byte(`{"test":"expiry"}`),
-		message.Attributes{
-			message.AttrID:              msgID,
-			message.AttrType:            "azservicebus.integration.test.expiry",
-			message.AttrSource:          "/test",
-			message.AttrDataContentType: "application/json",
-			message.AttrExpiryTime:      expiry.Format(time.RFC3339),
+	sub, err := gosb.NewSubscriber(client, topicSub, "test", gosb.SubscriberConfig{
+		Properties: gosb.SubscriberProperties{
+			TimeToLive: func(d time.Duration, msg *message.RawMessage) {
+				msg.Attributes[message.AttrExpiryTime] = time.Now().UTC().Add(d)
+			},
 		},
-		nil,
-	)
-	err = pub.PublishBatch(ctx, "test", msg)
+	})
 	require.NoError(t, err)
-	t.Logf("Published message with expiry: %s", expiry.Format(time.RFC3339))
 
-	// Subscribe and receive
 	msgChan, err := sub.Subscribe(ctx, "test")
+	require.NoError(t, err)
+
+	err = pub.PublishBatch(ctx, "test", message.NewRaw(
+		[]byte(`{"test":"ttl"}`),
+		message.Attributes{message.AttrID: "ttl-test-msg"},
+		nil,
+	))
 	require.NoError(t, err)
 
 	select {
 	case received := <-msgChan:
-		assert.Equal(t, msgID, received.ID())
-
-		// Verify expirytime is preserved
-		receivedExpiry := received.ExpiryTime()
-		assert.False(t, receivedExpiry.IsZero(), "expirytime should be set")
-
-		// Allow 2 second tolerance for timing differences
-		diff := receivedExpiry.Sub(expiry).Abs()
-		assert.Less(t, diff, 2*time.Second, "expirytime should be within 2 seconds of original: got %v, want %v", receivedExpiry, expiry)
-
-		t.Logf("Received message with expiry: %s (diff: %v)", receivedExpiry.Format(time.RFC3339), diff)
+		assert.False(t, received.ExpiryTime().IsZero(), "ExpiryTime should be set via SubscriberProperties.TimeToLive")
+		t.Logf("ExpiryTime set to: %s", received.ExpiryTime())
 		received.Ack()
 	case <-time.After(15 * time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
-
-	cancel()
 }
 
-func TestSubscriber_NoExpiryTimeWhenNotSet(t *testing.T) {
+func TestSubscriber_NoExpiryTimeByDefault(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -250,7 +237,6 @@ func TestSubscriber_NoExpiryTimeWhenNotSet(t *testing.T) {
 
 	topicSub := fmt.Sprintf("%s/%s", topicName, subName)
 
-	// Create publisher and subscriber
 	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{})
 	require.NoError(t, err)
 	defer pub.Close()
@@ -258,45 +244,23 @@ func TestSubscriber_NoExpiryTimeWhenNotSet(t *testing.T) {
 	sub, err := gosb.NewSubscriber(client, topicSub, "test", gosb.SubscriberConfig{})
 	require.NoError(t, err)
 
-	// Publish message WITHOUT expirytime set
-	msgID := "no-expiry-test-msg"
-	msg := message.NewRaw(
-		[]byte(`{"test":"no-expiry"}`),
-		message.Attributes{
-			message.AttrID:              msgID,
-			message.AttrType:            "azservicebus.integration.test.noexpiry",
-			message.AttrSource:          "/test",
-			message.AttrDataContentType: "application/json",
-		},
-		nil,
-	)
-	err = pub.PublishBatch(ctx, "test", msg)
-	require.NoError(t, err)
-	t.Log("Published message without expirytime")
-
-	// Subscribe and receive
 	msgChan, err := sub.Subscribe(ctx, "test")
+	require.NoError(t, err)
+
+	err = pub.PublishBatch(ctx, "test", message.NewRaw(
+		[]byte(`{"test":"no-expiry"}`),
+		message.Attributes{message.AttrID: "no-expiry-test-msg"},
+		nil,
+	))
 	require.NoError(t, err)
 
 	select {
 	case received := <-msgChan:
-		assert.Equal(t, msgID, received.ID())
-
-		// With async settlement + lock renewal, expiry time is NOT set by default.
-		// Only CloudEvents expirytime (business deadline) sets it.
-		// Lock renewal keeps the message locked indefinitely, so LockedUntil is not a deadline.
-		// ShutdownTimeout is for shutdown, not processing timeout.
-		receivedExpiry := received.ExpiryTime()
-		assert.True(t, receivedExpiry.IsZero(),
-			"expirytime should NOT be set when no CloudEvents expirytime is present (lock renewal handles lock duration)")
-
-		t.Log("Verified: No expiry time set when CloudEvents expirytime absent")
+		assert.True(t, received.ExpiryTime().IsZero(), "ExpiryTime should not be set without SubscriberProperties.TimeToLive")
 		received.Ack()
 	case <-time.After(15 * time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
-
-	cancel()
 }
 
 func TestSubscriber_ContextCancellation(t *testing.T) {

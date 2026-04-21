@@ -1,13 +1,13 @@
 package azservicebus_test
 
 import (
-	gosb "github.com/fxsml/gopipe-azservicebus"
 	"context"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	gosb "github.com/fxsml/gopipe-azservicebus"
 
 	"github.com/fxsml/gopipe/message"
 	"github.com/stretchr/testify/assert"
@@ -727,4 +727,55 @@ func TestPublisher_StreamingPublishErrorHandler(t *testing.T) {
 	_ = errorHandlerCalled
 	_ = capturedBatch
 	_ = capturedErr
+}
+
+func TestPublisher_ScheduledEnqueueTime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	topicName, subName, cleanup := testTopicSetup(t, ctx)
+	defer cleanup()
+
+	topicSub := fmt.Sprintf("%s/%s", topicName, subName)
+
+	delay := 10 * time.Second
+	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{
+		Properties: gosb.PublisherProperties{
+			ScheduledEnqueueTime: func(*message.RawMessage) time.Time {
+				return time.Now().UTC().Add(delay)
+			},
+		},
+	})
+	require.NoError(t, err)
+	defer pub.Close()
+
+	sub, err := gosb.NewSubscriber(client, topicSub, "test", gosb.SubscriberConfig{})
+	require.NoError(t, err)
+
+	msgChan, err := sub.Subscribe(ctx, "test")
+	require.NoError(t, err)
+
+	sentAt := time.Now().UTC()
+
+	msg := message.NewRaw(
+		[]byte(`{"test":"scheduled"}`),
+		message.Attributes{
+			message.AttrID:   "scheduled-test",
+			message.AttrType: "azservicebus.test.scheduled",
+		},
+		nil,
+	)
+	err = pub.PublishBatch(ctx, "test", msg)
+	require.NoError(t, err)
+
+	// Message should not arrive before the delay elapses
+	select {
+	case received := <-msgChan:
+		elapsed := time.Since(sentAt)
+		assert.GreaterOrEqual(t, elapsed, delay, "message arrived before scheduled enqueue time")
+		t.Logf("Message received after %s (delay was %s)", elapsed, delay)
+		received.Ack()
+	case <-time.After(delay + 30*time.Second):
+		t.Fatal("Timeout waiting for scheduled message")
+	}
 }
