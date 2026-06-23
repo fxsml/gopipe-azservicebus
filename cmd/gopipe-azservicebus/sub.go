@@ -27,7 +27,7 @@ var (
 	}
 	sbTimeoutFlag = &cli.DurationFlag{
 		Name:    "timeout",
-		Aliases: []string{"T"},
+		Aliases: []string{"t"},
 		Usage:   "stop after this duration; 0 or unset means no timeout",
 	}
 	sbLimitFlag = &cli.IntFlag{

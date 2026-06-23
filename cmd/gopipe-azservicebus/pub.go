@@ -19,7 +19,7 @@ var (
 
 	sbTopicFlag = &cli.StringFlag{
 		Name:     "topic",
-		Aliases:  []string{"t"},
+		Aliases:  []string{"T"},
 		Required: true,
 		Usage:    "topic or queue name to publish to",
 	}
