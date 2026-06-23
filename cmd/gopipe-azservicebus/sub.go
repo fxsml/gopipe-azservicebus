@@ -91,24 +91,30 @@ var (
 			}
 
 			// Stream messages as JSONL using gopipe's WriteTo()
-			var count int
+			var received, written int64
 			for msg := range msgs {
+				received++
+
 				if _, err := msg.WriteTo(writer); err != nil {
+					slog.Info("Subscribe complete", "received", received, "written", written)
 					return fmt.Errorf("write msg: %w", err)
 				}
 				if _, err := writer.Write([]byte("\n")); err != nil {
+					slog.Info("Subscribe complete", "received", received, "written", written)
 					return fmt.Errorf("write msg: %w", err)
 				}
+				written++
 
 				// Cancel as soon as we reach the limit. msg.Ack() must be called afterwards
 				// to prevent the next message to be inflight.
-				count++
-				if limit > 0 && count >= limit {
+				if limit > 0 && written >= int64(limit) {
 					cancel()
 				}
 
 				msg.Ack()
 			}
+
+			slog.Info("Subscribe complete", "received", received, "written", written)
 			return nil
 		},
 		Flags: []cli.Flag{
