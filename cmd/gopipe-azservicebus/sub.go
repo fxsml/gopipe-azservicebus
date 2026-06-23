@@ -76,6 +76,8 @@ var (
 
 			cfg := servicebus.SubscriberConfig{}
 			if limit > 0 {
+				// MaxInFlight=1 ensures no next message is prefetched before Ack(),
+				// so cancel() in the loop below stops intake cleanly at the limit.
 				cfg.MaxInFlight = 1
 			}
 
@@ -105,8 +107,8 @@ var (
 				}
 				written++
 
-				// Cancel as soon as we reach the limit. msg.Ack() must be called afterwards
-				// to prevent the next message to be inflight.
+				// Cancel before Ack so the subscriber stops fetching. Safe because
+				// MaxInFlight=1 guarantees no message is already in flight at this point.
 				if limit > 0 && written >= int64(limit) {
 					cancel()
 				}
