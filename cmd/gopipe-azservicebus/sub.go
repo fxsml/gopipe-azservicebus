@@ -36,6 +36,11 @@ var (
 		Aliases: []string{"l"},
 		Usage:   "maximum number of messages to read before exiting; 0 means unlimited",
 	}
+	sbPeekFlag = &cli.BoolFlag{
+		Name:    "peek",
+		Aliases: []string{"p"},
+		Usage:   "peek mode; true if you want to use non-destructive peek mode",
+	}
 
 	// subscribe command
 
@@ -75,7 +80,9 @@ var (
 				return fmt.Errorf("create ServiceBus client: %w", err)
 			}
 
-			cfg := servicebus.SubscriberConfig{}
+			cfg := servicebus.SubscriberConfig{
+				EnablePeekMode: cmd.Bool("peek"),
+			}
 			if limit > 0 {
 				// MaxInFlight=1 ensures no next message is prefetched before Ack(),
 				// so cancel() in the loop below stops intake cleanly at the limit.
@@ -119,6 +126,7 @@ var (
 			sbTimeoutFlag,
 			sbLimitFlag,
 			sbOutputFileFlag,
+			sbPeekFlag,
 		},
 	}
 )
