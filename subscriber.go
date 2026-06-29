@@ -61,6 +61,15 @@ type SubscriberConfig struct {
 	// Each field is a function receiving the broker property value and the message to mutate.
 	// Nil functions and nil broker property fields are skipped.
 	Properties SubscriberProperties
+
+	// EnablePeekMode causes the subscriber to use PeekMessages instead of ReceiveMessages.
+	// Messages are read without acquiring a lock and are left on the bus after processing.
+	// No settlement (complete/abandon) or lock renewal is performed.
+	EnablePeekMode bool
+
+	// PeekPollInterval is the delay between poll attempts when no messages are available
+	// in peek mode. Ignored when EnablePeekMode is false. Defaults to 1 second.
+	PeekPollInterval time.Duration
 }
 
 // SubscriberProperties holds per-field mapping functions from Azure Service Bus broker
@@ -122,6 +131,9 @@ func (c SubscriberConfig) withDefaults() SubscriberConfig {
 	}
 	if c.ReconnectBackoff <= 0 {
 		c.ReconnectBackoff = 5 * time.Second
+	}
+	if c.PeekPollInterval <= 0 {
+		c.PeekPollInterval = time.Second
 	}
 	return c
 }
@@ -206,9 +218,13 @@ func NewSubscriber(client *azservicebus.Client, topic, pipeline string, config S
 
 func createReceiver(client *azservicebus.Client, topic string) (*azservicebus.Receiver, error) {
 	if parts := strings.Split(topic, "/"); len(parts) == 2 {
-		return client.NewReceiverForSubscription(parts[0], parts[1], nil)
+		return client.NewReceiverForSubscription(parts[0], parts[1], &azservicebus.ReceiverOptions{
+			ReceiveMode: azservicebus.ReceiveModePeekLock,
+		})
 	}
-	return client.NewReceiverForQueue(topic, nil)
+	return client.NewReceiverForQueue(topic, &azservicebus.ReceiverOptions{
+		ReceiveMode: azservicebus.ReceiveModePeekLock,
+	})
 }
 
 // Subscribe starts receiving messages and returns a channel.
@@ -280,9 +296,15 @@ func (s *Subscriber) Subscribe(ctx context.Context, pipeline string) (<-chan *me
 			receiver := s.receiver
 			s.receiverMu.Unlock()
 
-			// Receive messages
+			// Receive (or peek) messages
 			receiveStart := time.Now()
-			msgs, err := receiver.ReceiveMessages(subCtx, s.config.PrefetchCount, nil)
+			var msgs []*azservicebus.ReceivedMessage
+			var err error
+			if s.config.EnablePeekMode {
+				msgs, err = receiver.PeekMessages(subCtx, s.config.PrefetchCount, nil)
+			} else {
+				msgs, err = receiver.ReceiveMessages(subCtx, s.config.PrefetchCount, nil)
+			}
 			receiveDuration := time.Since(receiveStart)
 
 			if err != nil {
@@ -290,6 +312,20 @@ func (s *Subscriber) Subscribe(ctx context.Context, pipeline string) (<-chan *me
 					continue // Reconnected, retry
 				}
 				return // Fatal error or shutdown
+			}
+
+			// PeekMessages uses an RPC request that the broker answers immediately with
+			// whatever is currently in the queue (HTTP 204 → empty slice when nothing is
+			// there). Unlike ReceiveMessages, the broker does not hold the request open
+			// waiting for new messages to arrive. Throttle the poll loop to avoid hammering
+			// the broker when the queue is empty.
+			if s.config.EnablePeekMode && len(msgs) == 0 {
+				select {
+				case <-subCtx.Done():
+					return
+				case <-time.After(s.config.PeekPollInterval):
+					continue
+				}
 			}
 
 			tel.RecordReceive(subCtx, s.topic, pipeline, len(msgs), receiveDuration)
@@ -343,6 +379,7 @@ func (s *Subscriber) newHandler(
 		renewalInterval:      s.config.LockRenewalInterval,
 		operationTimeout:     s.config.OperationTimeout,
 		disableLockRenewal:   s.config.DisableLockRenewal,
+		peekMode:             s.config.EnablePeekMode,
 		subscriberProperties: s.config.Properties,
 		inFlight:             s.inFlight,
 		abort:                abort,
@@ -476,6 +513,7 @@ type messageHandler struct {
 	renewalInterval      time.Duration // 0 = auto-detect
 	operationTimeout     time.Duration
 	disableLockRenewal   bool
+	peekMode             bool // message has no lock; skip renewal and settlement
 	subscriberProperties SubscriberProperties
 	inFlight             *semaphore.Semaphore
 	receiveTime          time.Time
@@ -535,9 +573,9 @@ func (h *messageHandler) handle() {
 		renewalInterval = DefaultLockRenewalInterval
 	}
 
-	// Lock renewal ticker (optional)
+	// Lock renewal ticker (optional; skipped in peek mode — messages have no lock)
 	var tickerC <-chan time.Time
-	if !h.disableLockRenewal {
+	if !h.disableLockRenewal && !h.peekMode {
 		ticker := time.NewTicker(renewalInterval)
 		defer ticker.Stop()
 		tickerC = ticker.C
@@ -576,12 +614,16 @@ func (h *messageHandler) handle() {
 }
 
 // settle completes or abandons the message with Service Bus.
+// In peek mode the message has no lock, so settlement is skipped and the message stays on the bus.
 func (h *messageHandler) settle(err error) {
 	opCtx, cancel := context.WithTimeout(context.Background(), h.operationTimeout)
 	defer cancel()
 
 	if err == nil {
 		tel.RecordAck(context.Background(), h.topic, h.pipeline, h.msgType())
+		if h.peekMode {
+			return
+		}
 		if settleErr := h.receiver.CompleteMessage(opCtx, h.msg, nil); settleErr != nil {
 			if h.isExpectedSettlementError(settleErr) {
 				h.logger.Warn("Cannot complete message, will be redelivered",
@@ -593,6 +635,9 @@ func (h *messageHandler) settle(err error) {
 		}
 	} else {
 		tel.RecordNack(context.Background(), h.topic, h.pipeline, h.msgType())
+		if h.peekMode {
+			return
+		}
 		if settleErr := h.receiver.AbandonMessage(opCtx, h.msg, nil); settleErr != nil {
 			if h.isExpectedSettlementError(settleErr) {
 				h.logger.Warn("Cannot abandon message, will be redelivered",
