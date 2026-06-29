@@ -335,10 +335,7 @@ func (s *Subscriber) Subscribe(ctx context.Context, pipeline string) (<-chan *me
 				if err := s.inFlight.Acquire(subCtx, 1); err != nil {
 					return // Context cancelled
 				}
-
-				attrs := s.extractAttrs(sbMsg)
-				handler := s.newHandler(receiver, sbMsg, attrs, receiveTime, sub.abort, pipeline, msgChan)
-				handler.handle()
+				s.handle(receiver, sbMsg, msgChan, sub.abort, pipeline, receiveTime)
 			}
 		}
 	}()
@@ -351,39 +348,6 @@ func (s *Subscriber) clearActiveSubscription() {
 	s.subMu.Lock()
 	s.activeSub = nil
 	s.subMu.Unlock()
-}
-
-// newHandler creates a message handler with subscriber-level config
-// and message-specific fields. Only pass fields that vary per message.
-func (s *Subscriber) newHandler(
-	receiver *azservicebus.Receiver,
-	msg *azservicebus.ReceivedMessage,
-	attrs message.Attributes,
-	receiveTime time.Time,
-	abort <-chan struct{},
-	pipeline string,
-	msgChan chan<- *message.RawMessage,
-) *messageHandler {
-	return &messageHandler{
-		// Message-specific fields
-		receiver:    receiver,
-		msg:         msg,
-		attrs:       attrs,
-		receiveTime: receiveTime,
-		msgChan:     msgChan,
-
-		// Subscriber-level config (constant per subscriber)
-		logger:               s.logger,
-		topic:                s.topic,
-		pipeline:             pipeline,
-		renewalInterval:      s.config.LockRenewalInterval,
-		operationTimeout:     s.config.OperationTimeout,
-		disableLockRenewal:   s.config.DisableLockRenewal,
-		peekMode:             s.config.EnablePeekMode,
-		subscriberProperties: s.config.Properties,
-		inFlight:             s.inFlight,
-		abort:                abort,
-	}
 }
 
 // handleReceiveError handles errors from ReceiveMessages.
@@ -500,37 +464,16 @@ func getErrorCode(err error) string {
 	return "unknown"
 }
 
-// messageHandler handles a single message's lifecycle:
-// build → send to channel → renewal loop → settlement
-type messageHandler struct {
-	receiver             *azservicebus.Receiver
-	msg                  *azservicebus.ReceivedMessage
-	attrs                message.Attributes
-	msgChan              chan<- *message.RawMessage
-	logger               *slog.Logger
-	topic                string
-	pipeline             string
-	renewalInterval      time.Duration // 0 = auto-detect
-	operationTimeout     time.Duration
-	disableLockRenewal   bool
-	peekMode             bool // message has no lock; skip renewal and settlement
-	subscriberProperties SubscriberProperties
-	inFlight             *semaphore.Semaphore
-	receiveTime          time.Time
-	abort                <-chan struct{} // subscription abort signal (closed on timeout or Close())
-}
-
-// msgType extracts the CloudEvents type from the message attributes.
-func (h *messageHandler) msgType() string {
-	if t, ok := h.attrs[message.AttrType].(string); ok && t != "" {
-		return t
-	}
-	return ""
-}
-
 // handle sends the message to the pipeline synchronously (Phase 1), preserving batch order,
 // then spawns a goroutine for lock renewal and settlement (Phase 2).
-func (h *messageHandler) handle() {
+func (s *Subscriber) handle(
+	receiver *azservicebus.Receiver,
+	msg *azservicebus.ReceivedMessage,
+	msgChan chan<- *message.RawMessage,
+	abort <-chan struct{},
+	pipeline string,
+	receiveTime time.Time,
+) {
 	// === Phase 1 (sync): build message and send to pipeline ===
 	// Running synchronously in the dispatch loop preserves the order messages were received
 	// from the broker. The dispatch loop blocks here until the channel slot is available,
@@ -540,19 +483,20 @@ func (h *messageHandler) handle() {
 		func() { result <- nil },
 		func(e error) { result <- e },
 	)
-	pipelineMsg := message.NewRaw(h.msg.Body, h.attrs, acking)
-	h.subscriberProperties.apply(h.msg, pipelineMsg)
+	attrs := s.extractAttrs(msg)
+	pipelineMsg := message.NewRaw(msg.Body, attrs, acking)
+	s.config.Properties.apply(msg, pipelineMsg)
+	msgType := pipelineMsg.Type()
 
-	// Measure channel send duration (backpressure indicator)
 	sendStart := time.Now()
 	select {
-	case h.msgChan <- pipelineMsg:
-		tel.RecordChannelSend(context.Background(), h.topic, h.pipeline,
-			time.Since(sendStart), len(h.msgChan), cap(h.msgChan))
+	case msgChan <- pipelineMsg:
+		tel.RecordChannelSend(context.Background(), s.topic, pipeline,
+			time.Since(sendStart), len(msgChan), cap(msgChan))
 
-	case <-h.abort:
-		h.inFlight.Release(1)
-		h.settle(ErrSubscriberClosed)
+	case <-abort:
+		s.inFlight.Release(1)
+		s.settle(receiver, msg, msgType, abort, pipeline, ErrSubscriberClosed)
 		return
 	}
 
@@ -560,14 +504,14 @@ func (h *messageHandler) handle() {
 	// Spawned after the send so it does not race with Phase 1 ordering.
 	// inFlight is released here, not in Phase 1, so the slot stays open until settlement.
 	go func() {
-		defer h.inFlight.Release(1)
+		defer s.inFlight.Release(1)
 		defer func() {
-			tel.RecordProcessingDuration(context.Background(), h.topic, h.pipeline, h.msgType(), time.Since(h.receiveTime))
+			tel.RecordProcessingDuration(context.Background(), s.topic, pipeline, msgType, time.Since(receiveTime))
 		}()
 
-		renewalInterval := h.renewalInterval
-		if renewalInterval == 0 && h.msg.LockedUntil != nil {
-			if d := time.Until(*h.msg.LockedUntil); d > 0 {
+		renewalInterval := s.config.LockRenewalInterval
+		if renewalInterval == 0 && msg.LockedUntil != nil {
+			if d := time.Until(*msg.LockedUntil); d > 0 {
 				renewalInterval = d / 2
 			}
 		}
@@ -577,7 +521,7 @@ func (h *messageHandler) handle() {
 
 		// Lock renewal ticker (optional; skipped in peek mode — messages have no lock)
 		var tickerC <-chan time.Time
-		if !h.disableLockRenewal && !h.peekMode {
+		if !s.config.DisableLockRenewal && !s.config.EnablePeekMode {
 			ticker := time.NewTicker(renewalInterval)
 			defer ticker.Stop()
 			tickerC = ticker.C
@@ -586,30 +530,30 @@ func (h *messageHandler) handle() {
 		for {
 			select {
 			case err := <-result:
-				h.settle(err)
+				s.settle(receiver, msg, msgType, abort, pipeline, err)
 				return
 
 			case <-tickerC:
 				// Use background context for renewal - don't let subscriber context timeout kill it
-				renewCtx, renewCancel := context.WithTimeout(context.Background(), h.operationTimeout)
-				err := h.receiver.RenewMessageLock(renewCtx, h.msg, nil)
+				renewCtx, renewCancel := context.WithTimeout(context.Background(), s.config.OperationTimeout)
+				err := receiver.RenewMessageLock(renewCtx, msg, nil)
 				renewCancel()
 
 				if err != nil {
 					if isReceiverInvalidError(err) {
-						h.logger.Warn("Lock lost, message will be redelivered",
-							"reason", getErrorCode(err), "message_id", h.msg.MessageID, "topic", h.topic)
-						tel.RecordLockLost(context.Background(), h.topic, h.pipeline, h.msgType())
+						s.logger.Warn("Lock lost, message will be redelivered",
+							"reason", getErrorCode(err), "message_id", msg.MessageID, "topic", s.topic)
+						tel.RecordLockLost(context.Background(), s.topic, pipeline, msgType)
 						return
 					}
-					h.logger.Warn("Lock renewal failed", "error", err,
-						"message_id", h.msg.MessageID, "topic", h.topic)
+					s.logger.Warn("Lock renewal failed", "error", err,
+						"message_id", msg.MessageID, "topic", s.topic)
 				} else {
-					tel.RecordLockRenewal(context.Background(), h.topic, h.pipeline, h.msgType())
+					tel.RecordLockRenewal(context.Background(), s.topic, pipeline, msgType)
 				}
 
-			case <-h.abort:
-				h.settle(ErrSubscriberClosed)
+			case <-abort:
+				s.settle(receiver, msg, msgType, abort, pipeline, ErrSubscriberClosed)
 				return
 			}
 		}
@@ -618,64 +562,71 @@ func (h *messageHandler) handle() {
 
 // settle completes or abandons the message with Service Bus.
 // In peek mode the message has no lock, so settlement is skipped and the message stays on the bus.
-func (h *messageHandler) settle(err error) {
-	opCtx, cancel := context.WithTimeout(context.Background(), h.operationTimeout)
+func (s *Subscriber) settle(
+	receiver *azservicebus.Receiver,
+	msg *azservicebus.ReceivedMessage,
+	msgType string,
+	abort <-chan struct{},
+	pipeline string,
+	err error,
+) {
+	opCtx, cancel := context.WithTimeout(context.Background(), s.config.OperationTimeout)
 	defer cancel()
 
 	if err == nil {
-		tel.RecordAck(context.Background(), h.topic, h.pipeline, h.msgType())
-		if h.peekMode {
+		tel.RecordAck(context.Background(), s.topic, pipeline, msgType)
+		if s.config.EnablePeekMode {
 			return
 		}
-		if settleErr := h.receiver.CompleteMessage(opCtx, h.msg, nil); settleErr != nil {
-			if h.isExpectedSettlementError(settleErr) {
-				h.logger.Warn("Cannot complete message, will be redelivered",
-					"reason", settlementErrorReason(settleErr), "message_id", h.msg.MessageID, "topic", h.topic)
+		if settleErr := receiver.CompleteMessage(opCtx, msg, nil); settleErr != nil {
+			if s.isExpectedSettlementError(abort, settleErr) {
+				s.logger.Warn("Cannot complete message, will be redelivered",
+					"reason", settlementErrorReason(settleErr), "message_id", msg.MessageID, "topic", s.topic)
 				return
 			}
-			h.logger.Error("Failed to complete message",
-				"error", settleErr, "message_id", h.msg.MessageID, "topic", h.topic)
+			s.logger.Error("Failed to complete message",
+				"error", settleErr, "message_id", msg.MessageID, "topic", s.topic)
 		}
 	} else {
-		tel.RecordNack(context.Background(), h.topic, h.pipeline, h.msgType())
-		if h.peekMode {
+		tel.RecordNack(context.Background(), s.topic, pipeline, msgType)
+		if s.config.EnablePeekMode {
 			return
 		}
-		if settleErr := h.receiver.AbandonMessage(opCtx, h.msg, nil); settleErr != nil {
-			if h.isExpectedSettlementError(settleErr) {
-				h.logger.Warn("Cannot abandon message, will be redelivered",
+		if settleErr := receiver.AbandonMessage(opCtx, msg, nil); settleErr != nil {
+			if s.isExpectedSettlementError(abort, settleErr) {
+				s.logger.Warn("Cannot abandon message, will be redelivered",
 					"reason", settlementErrorReason(settleErr), "original_error", err,
-					"message_id", h.msg.MessageID, "topic", h.topic)
+					"message_id", msg.MessageID, "topic", s.topic)
 				return
 			}
-			h.logger.Error("Failed to abandon message",
+			s.logger.Error("Failed to abandon message",
 				"error", settleErr, "original_error", err,
-				"message_id", h.msg.MessageID, "topic", h.topic)
+				"message_id", msg.MessageID, "topic", s.topic)
 			return
 		}
-		h.logger.Warn("Message abandoned", "original_error", err,
-			"message_id", h.msg.MessageID, "topic", h.topic)
+		s.logger.Warn("Message abandoned", "original_error", err,
+			"message_id", msg.MessageID, "topic", s.topic)
 	}
 }
 
 // isExpectedSettlementError checks if an error is expected during shutdown or reconnect.
 // Returns true for Service Bus errors (lock lost, connection lost) and context errors
 // during shutdown. Context errors outside of shutdown are unexpected (e.g., Service Bus slow).
-func (h *messageHandler) isExpectedSettlementError(err error) bool {
+func (s *Subscriber) isExpectedSettlementError(abort <-chan struct{}, err error) bool {
 	if isReceiverInvalidError(err) {
 		return true
 	}
 	// Context errors are only expected during shutdown
-	if h.isShuttingDown() && isContextError(err) {
+	if isShuttingDown(abort) && isContextError(err) {
 		return true
 	}
 	return false
 }
 
 // isShuttingDown checks if the subscription is being aborted.
-func (h *messageHandler) isShuttingDown() bool {
+func isShuttingDown(abort <-chan struct{}) bool {
 	select {
-	case <-h.abort:
+	case <-abort:
 		return true
 	default:
 		return false
