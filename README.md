@@ -61,6 +61,55 @@ for msg := range ch {
 go get github.com/fxsml/gopipe-azservicebus
 ```
 
+## CLI
+
+A command-line tool for publishing and subscribing to Azure Service Bus using JSONL (JSON Lines).
+
+### Install
+
+```bash
+go install github.com/fxsml/gopipe-azservicebus/cmd/gopipe-azservicebus@latest
+```
+
+### Connection
+
+Pass the Service Bus connection string via flag or environment variable:
+
+```bash
+export SERVICEBUS_CONNECTION="Endpoint=sb://..."
+# or per-command: --connection "Endpoint=sb://..."
+# or via env file: --env-file .env.local
+```
+
+### Publish
+
+Read JSONL from stdin or a file and publish to a topic:
+
+```bash
+# from stdin
+echo '{"specversion":"1.0","type":"com.example.event","source":"/test","id":"1"}' \
+  | gopipe-azservicebus pub --topic my-topic
+
+# from file
+gopipe-azservicebus pub --topic my-topic --input-file events.jsonl
+```
+
+### Subscribe
+
+Receive messages and write them as JSONL to stdout or a file:
+
+```bash
+# to stdout (Ctrl+C to stop)
+gopipe-azservicebus sub --subscription my-topic/my-subscription
+
+# to file, stop after 100 messages or 30 seconds
+gopipe-azservicebus sub --subscription my-topic/my-subscription \
+  --output-file out.jsonl --limit 100 --timeout 30s
+
+# non-destructive peek (messages are not acknowledged)
+gopipe-azservicebus sub --subscription my-topic/my-subscription --peek
+```
+
 ## Known Issues
 
 See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for documented edge cases and mitigations.
