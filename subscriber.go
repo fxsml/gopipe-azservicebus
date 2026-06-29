@@ -338,7 +338,7 @@ func (s *Subscriber) Subscribe(ctx context.Context, pipeline string) (<-chan *me
 
 				attrs := s.extractAttrs(sbMsg)
 				handler := s.newHandler(receiver, sbMsg, attrs, receiveTime, sub.abort, pipeline, msgChan)
-				go handler.handle()
+				handler.handle()
 			}
 		}
 	}()
@@ -528,14 +528,13 @@ func (h *messageHandler) msgType() string {
 	return ""
 }
 
-// handle runs the complete message lifecycle in a single goroutine.
+// handle sends the message to the pipeline synchronously (Phase 1), preserving batch order,
+// then spawns a goroutine for lock renewal and settlement (Phase 2).
 func (h *messageHandler) handle() {
-	defer h.inFlight.Release(1)
-	defer func() {
-		tel.RecordProcessingDuration(context.Background(), h.topic, h.pipeline, h.msgType(), time.Since(h.receiveTime))
-	}()
-
-	// === Phase 1: Build message and send to pipeline ===
+	// === Phase 1 (sync): build message and send to pipeline ===
+	// Running synchronously in the dispatch loop preserves the order messages were received
+	// from the broker. The dispatch loop blocks here until the channel slot is available,
+	// which also provides natural backpressure.
 	result := make(chan error, 1)
 	acking := message.NewAcking(
 		func() { result <- nil },
@@ -548,69 +547,73 @@ func (h *messageHandler) handle() {
 	sendStart := time.Now()
 	select {
 	case h.msgChan <- pipelineMsg:
-		sendDuration := time.Since(sendStart)
-
-		// Record channel metrics
-		depth := len(h.msgChan)
-		capacity := cap(h.msgChan)
-		tel.RecordChannelSend(context.Background(), h.topic, h.pipeline, sendDuration, depth, capacity)
+		tel.RecordChannelSend(context.Background(), h.topic, h.pipeline,
+			time.Since(sendStart), len(h.msgChan), cap(h.msgChan))
 
 	case <-h.abort:
+		h.inFlight.Release(1)
 		h.settle(ErrSubscriberClosed)
 		return
 	}
 
-	// === Phase 2: Lock renewal loop until settlement ===
+	// === Phase 2 (async): lock renewal loop until settlement ===
+	// Spawned after the send so it does not race with Phase 1 ordering.
+	// inFlight is released here, not in Phase 1, so the slot stays open until settlement.
+	go func() {
+		defer h.inFlight.Release(1)
+		defer func() {
+			tel.RecordProcessingDuration(context.Background(), h.topic, h.pipeline, h.msgType(), time.Since(h.receiveTime))
+		}()
 
-	// Calculate renewal interval
-	renewalInterval := h.renewalInterval
-	if renewalInterval == 0 && h.msg.LockedUntil != nil {
-		if d := time.Until(*h.msg.LockedUntil); d > 0 {
-			renewalInterval = d / 2
-		}
-	}
-	if renewalInterval == 0 {
-		renewalInterval = DefaultLockRenewalInterval
-	}
-
-	// Lock renewal ticker (optional; skipped in peek mode — messages have no lock)
-	var tickerC <-chan time.Time
-	if !h.disableLockRenewal && !h.peekMode {
-		ticker := time.NewTicker(renewalInterval)
-		defer ticker.Stop()
-		tickerC = ticker.C
-	}
-
-	for {
-		select {
-		case err := <-result:
-			h.settle(err)
-			return
-
-		case <-tickerC:
-			// Use background context for renewal - don't let subscriber context timeout kill it
-			renewCtx, renewCancel := context.WithTimeout(context.Background(), h.operationTimeout)
-			err := h.receiver.RenewMessageLock(renewCtx, h.msg, nil)
-			renewCancel()
-
-			if err != nil {
-				if isReceiverInvalidError(err) {
-					h.logger.Warn("Lock lost, message will be redelivered",
-						"reason", getErrorCode(err), "message_id", h.msg.MessageID, "topic", h.topic)
-					tel.RecordLockLost(context.Background(), h.topic, h.pipeline, h.msgType())
-					return
-				}
-				h.logger.Warn("Lock renewal failed", "error", err,
-					"message_id", h.msg.MessageID, "topic", h.topic)
-			} else {
-				tel.RecordLockRenewal(context.Background(), h.topic, h.pipeline, h.msgType())
+		renewalInterval := h.renewalInterval
+		if renewalInterval == 0 && h.msg.LockedUntil != nil {
+			if d := time.Until(*h.msg.LockedUntil); d > 0 {
+				renewalInterval = d / 2
 			}
-
-		case <-h.abort:
-			h.settle(ErrSubscriberClosed)
-			return
 		}
-	}
+		if renewalInterval == 0 {
+			renewalInterval = DefaultLockRenewalInterval
+		}
+
+		// Lock renewal ticker (optional; skipped in peek mode — messages have no lock)
+		var tickerC <-chan time.Time
+		if !h.disableLockRenewal && !h.peekMode {
+			ticker := time.NewTicker(renewalInterval)
+			defer ticker.Stop()
+			tickerC = ticker.C
+		}
+
+		for {
+			select {
+			case err := <-result:
+				h.settle(err)
+				return
+
+			case <-tickerC:
+				// Use background context for renewal - don't let subscriber context timeout kill it
+				renewCtx, renewCancel := context.WithTimeout(context.Background(), h.operationTimeout)
+				err := h.receiver.RenewMessageLock(renewCtx, h.msg, nil)
+				renewCancel()
+
+				if err != nil {
+					if isReceiverInvalidError(err) {
+						h.logger.Warn("Lock lost, message will be redelivered",
+							"reason", getErrorCode(err), "message_id", h.msg.MessageID, "topic", h.topic)
+						tel.RecordLockLost(context.Background(), h.topic, h.pipeline, h.msgType())
+						return
+					}
+					h.logger.Warn("Lock renewal failed", "error", err,
+						"message_id", h.msg.MessageID, "topic", h.topic)
+				} else {
+					tel.RecordLockRenewal(context.Background(), h.topic, h.pipeline, h.msgType())
+				}
+
+			case <-h.abort:
+				h.settle(ErrSubscriberClosed)
+				return
+			}
+		}
+	}()
 }
 
 // settle completes or abandons the message with Service Bus.
