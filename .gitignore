@@ -28,6 +28,12 @@ go.work.sum
 .env
 .env.*
 
+# Temporary files
+tmp.*
+
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+
+# sbx/sandbox
+.sbx/
