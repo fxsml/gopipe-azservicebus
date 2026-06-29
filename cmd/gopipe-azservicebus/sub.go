@@ -8,6 +8,7 @@ import (
 	"os"
 
 	servicebus "github.com/fxsml/gopipe-azservicebus"
+	"github.com/fxsml/gopipe-azservicebus/internal/jsonl"
 	"github.com/urfave/cli/v3"
 )
 
@@ -41,7 +42,7 @@ var (
 	sbSubscribeCmd = &cli.Command{
 		Name:  "sub",
 		Usage: "subscribe to CloudEvents messages from a Service Bus subscription",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
+		Action: withOSSignal(func(ctx context.Context, cmd *cli.Command) error {
 			var cancel context.CancelFunc
 			if timeout := cmd.Duration("timeout"); timeout > 0 {
 				ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -92,33 +93,27 @@ var (
 				return fmt.Errorf("start subscriber for %s: %w", subscription, err)
 			}
 
-			// Stream messages as JSONL using gopipe's WriteTo()
-			var received, written int64
-			for msg := range msgs {
-				received++
+			publisher := jsonl.NewPublisher(writer, jsonl.PublisherConfig{})
 
-				if _, err := msg.WriteTo(writer); err != nil {
-					slog.Info("Subscribe complete", "received", received, "written", written)
-					return fmt.Errorf("write msg: %w", err)
-				}
-				if _, err := writer.Write([]byte("\n")); err != nil {
-					slog.Info("Subscribe complete", "received", received, "written", written)
-					return fmt.Errorf("write msg: %w", err)
-				}
-				written++
-
-				// Cancel before Ack so the subscriber stops fetching. Safe because
-				// MaxInFlight=1 guarantees no message is already in flight at this point.
-				if limit > 0 && written >= int64(limit) {
-					cancel()
-				}
-
-				msg.Ack()
+			// Use context.Background() because we want to ensure that the publisher can finish writing
+			// all messages even if the main context is canceled.
+			done, err := publisher.Publish(context.Background(), msgs)
+			if err != nil {
+				return fmt.Errorf("start publisher for %s: %w", subscription, err)
 			}
 
-			slog.Info("Subscribe complete", "received", received, "written", written)
+			<-done
+			metrics := publisher.Metrics()
+			slog.Info("Publisher finished",
+				"subscription", subscription,
+				"limit", limit,
+				"timeout", cmd.Duration("timeout"),
+				"output-file", outputFile,
+				"received", metrics.Received,
+				"written", metrics.Written,
+			)
 			return nil
-		},
+		}),
 		Flags: []cli.Flag{
 			sbSubscriptionFlag,
 			sbTimeoutFlag,

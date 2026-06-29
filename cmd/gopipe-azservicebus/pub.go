@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,6 +9,7 @@ import (
 	"sync/atomic"
 
 	servicebus "github.com/fxsml/gopipe-azservicebus"
+	"github.com/fxsml/gopipe-azservicebus/internal/jsonl"
 	"github.com/fxsml/gopipe/message"
 	"github.com/urfave/cli/v3"
 )
@@ -35,7 +34,7 @@ var (
 	sbPublishCmd = &cli.Command{
 		Name:  "pub",
 		Usage: "publish CloudEvents messages to a Service Bus topic",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
+		Action: withOSSignal(func(ctx context.Context, cmd *cli.Command) error {
 			var reader io.Reader
 			inputFile := cmd.String("input-file")
 			if inputFile == "" || inputFile == "-" {
@@ -54,6 +53,14 @@ var (
 			}
 
 			topic := cmd.String("topic")
+
+			// Create jsonl subscriber
+			subscriber := jsonl.NewSubscriber(reader, jsonl.SubscriberConfig{})
+
+			ch, err := subscriber.Subscribe(ctx)
+			if err != nil {
+				return fmt.Errorf("subscribe to file %s: %w", inputFile, err)
+			}
 
 			// Create ServiceBus client and publisher
 			sbClient, err := servicebus.NewClient(cmd.String("connection"))
@@ -77,58 +84,29 @@ var (
 				}
 			}()
 
-			// Create channel for messages
-			ch := make(chan *message.RawMessage, 100)
-
-			// Start publisher
-			done, err := publisher.Publish(ctx, cliPipeline, ch)
+			// Use context.Background() because we want to ensure that the publisher can finish writing
+			// all messages even if the main context is canceled.
+			done, err := publisher.Publish(context.Background(), cliPipeline, ch)
 			if err != nil {
 				return fmt.Errorf("start publisher: %w", err)
 			}
 
-			// Parse JSONL messages using gopipe's ParseRaw()
-			var lineNum, sent, parseErrors int64
-			scanner := bufio.NewScanner(reader)
-			scanner.Buffer(make([]byte, 1<<20), 10<<20) // up to 10 MiB per line
-			for scanner.Scan() {
-				lineNum++
-				line := scanner.Bytes()
-				if len(line) == 0 {
-					continue
-				}
-
-				msg, err := message.ParseRaw(bytes.NewReader(line))
-				if err != nil {
-					parseErrors++
-					slog.Error("Failed to parse message", "line", lineNum, "error", err)
-					continue
-				}
-
-				ch <- msg
-				sent++
-			}
-
-			if err := scanner.Err(); err != nil {
-				close(ch)
-				<-done
-				return fmt.Errorf("reading input: %w", err)
-			}
-
-			// Close channel and wait for publisher to finish
-			close(ch)
 			<-done
 
 			publishFailed := publishErrors.Load()
+			subMetrics := subscriber.Metrics()
 			slog.Info("Publish complete",
-				"sent", sent-publishFailed,
+				"topic", topic,
+				"scanned", subMetrics.Scanned,
+				"ingested", subMetrics.Sent,
+				"parse_errors", subMetrics.ParseErrors,
 				"publish_errors", publishFailed,
-				"parse_errors", parseErrors,
 			)
-			if publishFailed > 0 || parseErrors > 0 {
-				return fmt.Errorf("%d message(s) failed to publish, %d line(s) failed to parse", publishFailed, parseErrors)
+			if publishFailed > 0 || subMetrics.ParseErrors > 0 {
+				return fmt.Errorf("%d message(s) failed to publish, %d line(s) failed to parse", publishFailed, subMetrics.ParseErrors)
 			}
 			return nil
-		},
+		}),
 		Flags: []cli.Flag{
 			sbTopicFlag,
 			sbInputFileFlag,
