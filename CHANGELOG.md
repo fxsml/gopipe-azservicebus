@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pub` CLI command: `--format` flag to publish a single JSON (CloudEvents) event file in addition to JSONL, with auto-detection based on `.json` extension
+
 ## [v0.1.0] - 2026-06-29
 
 ### Added

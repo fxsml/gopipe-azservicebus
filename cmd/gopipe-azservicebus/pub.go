@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync/atomic"
 
 	servicebus "github.com/fxsml/gopipe-azservicebus"
@@ -26,7 +27,13 @@ var (
 	sbInputFileFlag = &cli.StringFlag{
 		Name:    "input-file",
 		Aliases: []string{"i"},
-		Usage:   "jsonl (JSON Lines) file to read messages from; omit or use '-' for stdin",
+		Usage:   "file to read messages from; omit or use '-' for stdin",
+	}
+	sbFormatFlag = &cli.StringFlag{
+		Name:    "format",
+		Aliases: []string{"f"},
+		Value:   "auto",
+		Usage:   "input format: auto, json (single event), or jsonl (JSON Lines); auto detects .json extension",
 	}
 
 	// publish command
@@ -53,13 +60,10 @@ var (
 			}
 
 			topic := cmd.String("topic")
-
-			// Create jsonl subscriber
-			subscriber := jsonl.NewSubscriber(reader, jsonl.SubscriberConfig{})
-
-			ch, err := subscriber.Subscribe(ctx)
-			if err != nil {
-				return fmt.Errorf("subscribe to file %s: %w", inputFile, err)
+			format := resolveInputFormat(inputFile, cmd.String("format"))
+			if format != "json" && format != "jsonl" {
+				slog.Error("Invalid format", "format", format)
+				return fmt.Errorf("invalid format %q: must be json or jsonl", format)
 			}
 
 			// Create ServiceBus client and publisher
@@ -84,6 +88,29 @@ var (
 				}
 			}()
 
+			var (
+				ch         <-chan *message.RawMessage
+				subscriber *jsonl.Subscriber
+			)
+
+			if format == "json" {
+				msg, err := message.ParseRaw(reader)
+				if err != nil {
+					slog.Error("Failed to parse message", "error", err)
+					return fmt.Errorf("parse json: %w", err)
+				}
+				msgCh := make(chan *message.RawMessage, 1)
+				msgCh <- msg
+				close(msgCh)
+				ch = msgCh
+			} else {
+				subscriber = jsonl.NewSubscriber(reader, jsonl.SubscriberConfig{})
+				ch, err = subscriber.Subscribe(ctx)
+				if err != nil {
+					return fmt.Errorf("subscribe to file %s: %w", inputFile, err)
+				}
+			}
+
 			// Use context.Background() because we want to ensure that the publisher can finish writing
 			// all messages even if the main context is canceled.
 			done, err := publisher.Publish(context.Background(), cliPipeline, ch)
@@ -94,22 +121,41 @@ var (
 			<-done
 
 			publishFailed := publishErrors.Load()
-			subMetrics := subscriber.Metrics()
+			var scanned, sent, parseErrs int64
+			if subscriber != nil {
+				m := subscriber.Metrics()
+				scanned, sent, parseErrs = m.Scanned, m.Sent, m.ParseErrors
+			} else {
+				scanned, sent = 1, 1
+			}
 			slog.Info("Publish complete",
 				"topic", topic,
-				"scanned", subMetrics.Scanned,
-				"ingested", subMetrics.Sent,
-				"parse_errors", subMetrics.ParseErrors,
+				"scanned", scanned,
+				"ingested", sent,
+				"parse_errors", parseErrs,
 				"publish_errors", publishFailed,
 			)
-			if publishFailed > 0 || subMetrics.ParseErrors > 0 {
-				return fmt.Errorf("%d message(s) failed to publish, %d line(s) failed to parse", publishFailed, subMetrics.ParseErrors)
+			if publishFailed > 0 || parseErrs > 0 {
+				return fmt.Errorf("%d message(s) failed to publish, %d message(s) failed to parse", publishFailed, parseErrs)
 			}
 			return nil
 		}),
 		Flags: []cli.Flag{
 			sbTopicFlag,
 			sbInputFileFlag,
+			sbFormatFlag,
 		},
 	}
 )
+
+// resolveInputFormat determines the effective input format.
+// The explicit flag wins; "auto" falls back to file extension detection.
+func resolveInputFormat(inputFile, flag string) string {
+	if flag != "auto" {
+		return flag
+	}
+	if strings.HasSuffix(strings.ToLower(inputFile), ".json") {
+		return "json"
+	}
+	return "jsonl"
+}
