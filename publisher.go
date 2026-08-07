@@ -23,7 +23,7 @@ type PublisherConfig struct {
 	// ErrorHandler is called when batch publishing fails in streaming Publish().
 	// The batch contains the messages that failed to publish.
 	// Defaults to logging via Logger.
-	ErrorHandler func(batch []*message.RawMessage, err error)
+	ErrorHandler func(batch []*message.Message, err error)
 
 	// PublishTimeout is the timeout for each publish operation.
 	// Defaults to 60 seconds.
@@ -59,14 +59,14 @@ type PublisherConfig struct {
 // Resolvers receive the outgoing message so values can be derived statically or dynamically.
 // Nil functions and empty/zero return values are ignored.
 type PublisherProperties struct {
-	SessionID            func(*message.RawMessage) string
-	ReplyTo              func(*message.RawMessage) string
-	ReplyToSessionID     func(*message.RawMessage) string
-	To                   func(*message.RawMessage) string
-	Subject              func(*message.RawMessage) string
-	PartitionKey         func(*message.RawMessage) string
-	TimeToLive           func(*message.RawMessage) time.Duration
-	ScheduledEnqueueTime func(*message.RawMessage) time.Time
+	SessionID            func(*message.Message) string
+	ReplyTo              func(*message.Message) string
+	ReplyToSessionID     func(*message.Message) string
+	To                   func(*message.Message) string
+	Subject              func(*message.Message) string
+	PartitionKey         func(*message.Message) string
+	TimeToLive           func(*message.Message) time.Duration
+	ScheduledEnqueueTime func(*message.Message) time.Time
 }
 
 func (c PublisherConfig) withDefaults() PublisherConfig {
@@ -76,7 +76,7 @@ func (c PublisherConfig) withDefaults() PublisherConfig {
 	if c.ErrorHandler == nil {
 		// Default is no-op since PublishBatch logs errors with classification via logPublishError.
 		// Users can provide custom ErrorHandler for additional handling (alerting, custom metrics, etc.).
-		c.ErrorHandler = func(batch []*message.RawMessage, err error) {}
+		c.ErrorHandler = func(batch []*message.Message, err error) {}
 	}
 	if c.PublishTimeout <= 0 {
 		c.PublishTimeout = 60 * time.Second
@@ -142,7 +142,7 @@ func NewPublisher(client *azservicebus.Client, topic string, config PublisherCon
 // PublishBatch publishes messages to the topic.
 // The pipeline parameter is used for telemetry correlation (e.g., "cache", "derived").
 // Successfully published messages are Acked; on error, unpublished messages are Nacked.
-func (p *Publisher) PublishBatch(ctx context.Context, pipeline string, messages ...*message.RawMessage) error {
+func (p *Publisher) PublishBatch(ctx context.Context, pipeline string, messages ...*message.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -182,7 +182,14 @@ func (p *Publisher) PublishBatch(ctx context.Context, pipeline string, messages 
 		// Add messages to batch
 		added := 0
 		for i := published; i < len(messages); i++ {
-			sbMsg := p.toServiceBusMessage(messages[i])
+			sbMsg, err := p.toServiceBusMessage(messages[i])
+			if err != nil {
+				errClass := classifyError(err)
+				tel.RecordPublishError(ctx, p.topic, pipeline, errClass)
+				logPublishError(p.logger, err, errClass, p.topic, len(messages)-published)
+				nackAll(messages[published:], err)
+				return err
+			}
 			if err := batch.AddMessage(sbMsg, nil); err != nil {
 				tel.RecordMessageAdd(ctx, p.topic, pipeline, false)
 				if errors.Is(err, azservicebus.ErrMessageTooLarge) {
@@ -238,7 +245,7 @@ func (p *Publisher) PublishBatch(ctx context.Context, pipeline string, messages 
 // The pipeline parameter is used for telemetry correlation (e.g., "cache", "derived").
 // Messages are automatically batched for efficient network usage (see BatchSize, BatchTimeout).
 // Returns a done channel that closes when all messages are published or the publisher is closed.
-func (p *Publisher) Publish(ctx context.Context, pipeline string, in <-chan *message.RawMessage) (<-chan struct{}, error) {
+func (p *Publisher) Publish(ctx context.Context, pipeline string, in <-chan *message.Message) (<-chan struct{}, error) {
 	select {
 	case <-p.done:
 		return nil, ErrPublisherClosed
@@ -249,7 +256,7 @@ func (p *Publisher) Publish(ctx context.Context, pipeline string, in <-chan *mes
 	pipeCtx, cancel := context.WithCancel(ctx)
 
 	batchPipe := pipe.NewBatchPipe(
-		func(ctx context.Context, batch []*message.RawMessage) ([]struct{}, error) {
+		func(ctx context.Context, batch []*message.Message) ([]struct{}, error) {
 			return nil, p.PublishBatch(ctx, pipeline, batch...)
 		},
 		pipe.BatchConfig{
@@ -259,7 +266,7 @@ func (p *Publisher) Publish(ctx context.Context, pipeline string, in <-chan *mes
 				Concurrency:     p.config.Worker,
 				ShutdownTimeout: p.config.OperationTimeout,
 				ErrorHandler: func(in any, err error) {
-					batch := in.([]*message.RawMessage)
+					batch := in.([]*message.Message)
 					p.config.ErrorHandler(batch, err)
 				},
 			},
@@ -319,7 +326,7 @@ func (p *Publisher) createBatchWithRetry(ctx context.Context) (*azservicebus.Mes
 
 // sendBatchWithRetry sends the batch, retrying once on connection error.
 // On retry, it rebuilds the batch with the new sender since batches are sender-specific.
-func (p *Publisher) sendBatchWithRetry(ctx context.Context, batch *azservicebus.MessageBatch, messages []*message.RawMessage) error {
+func (p *Publisher) sendBatchWithRetry(ctx context.Context, batch *azservicebus.MessageBatch, messages []*message.Message) error {
 	p.mu.Lock()
 	sender := p.sender
 	p.mu.Unlock()
@@ -349,7 +356,11 @@ func (p *Publisher) sendBatchWithRetry(ctx context.Context, batch *azservicebus.
 		return fmt.Errorf("create retry batch: %w", err)
 	}
 	for _, msg := range messages {
-		if err := retryBatch.AddMessage(p.toServiceBusMessage(msg), nil); err != nil {
+		sbMsg, err := p.toServiceBusMessage(msg)
+		if err != nil {
+			return err
+		}
+		if err := retryBatch.AddMessage(sbMsg, nil); err != nil {
 			return fmt.Errorf("add to retry batch: %w", err)
 		}
 	}
@@ -469,14 +480,19 @@ func classifyError(err error) ErrorClass {
 	return ErrorClassUnknown
 }
 
-func (p *Publisher) toServiceBusMessage(msg *message.RawMessage) *azservicebus.Message {
+func (p *Publisher) toServiceBusMessage(msg *message.Message) (*azservicebus.Message, error) {
+	raw, ok := msg.Raw()
+	if !ok {
+		return nil, fmt.Errorf("message %s: %w: want raw []byte, got %T", msg.ID(), message.ErrUnexpectedDataType, msg.Data)
+	}
+
 	msgID := msg.ID()
 	if msgID == "" {
 		msgID = uuid.New().String()
 	}
 
 	sbMsg := &azservicebus.Message{
-		Body:                  msg.Data,
+		Body:                  raw,
 		MessageID:             &msgID,
 		ApplicationProperties: make(map[string]any),
 	}
@@ -547,10 +563,10 @@ func (p *Publisher) toServiceBusMessage(msg *message.RawMessage) *azservicebus.M
 		sbMsg.ApplicationProperties[cloudEventsPrefix+key] = value
 	}
 
-	return sbMsg
+	return sbMsg, nil
 }
 
-func nackAll(messages []*message.RawMessage, err error) {
+func nackAll(messages []*message.Message, err error) {
 	for _, msg := range messages {
 		msg.Nack(err)
 	}

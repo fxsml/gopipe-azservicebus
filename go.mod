@@ -5,8 +5,8 @@ go 1.24.7
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0
-	github.com/fxsml/gopipe/message v0.17.1
-	github.com/fxsml/gopipe/pipe v0.17.1
+	github.com/fxsml/gopipe/message v0.18.1-0.20260807051834-e1f82e6fe946
+	github.com/fxsml/gopipe/pipe v0.18.1-0.20260807051834-e1f82e6fe946
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/stretchr/testify v1.11.1

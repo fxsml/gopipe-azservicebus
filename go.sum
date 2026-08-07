@@ -24,8 +24,12 @@ github.com/fxsml/gopipe/channel v0.16.0 h1:ngHWVXOkPHxVjK1tIkaytoWZJhR2LIN2rXVwb
 github.com/fxsml/gopipe/channel v0.16.0/go.mod h1:KU0JFSXWGZnenOeWKWNU5CCfnfMWiKwtmjXh5bOS6r4=
 github.com/fxsml/gopipe/message v0.17.1 h1:/fLYHKbvZqzoDyWwtAd+i8hO786ZWBWMpqc1+/nMxyA=
 github.com/fxsml/gopipe/message v0.17.1/go.mod h1:7f7rGI+jglP1GbMGVk4GkqatYHXmcuKlaPtSC7LuU+Y=
+github.com/fxsml/gopipe/message v0.18.1-0.20260807051834-e1f82e6fe946 h1:WwZwzvRsImFYtHJzb9gGaI/T3vizbGM4eID8OYjMXG0=
+github.com/fxsml/gopipe/message v0.18.1-0.20260807051834-e1f82e6fe946/go.mod h1:8RQOkC3GEY0OkQvjNybk32bxaRRz6KoOpCMbWlFZeNo=
 github.com/fxsml/gopipe/pipe v0.17.1 h1:+k0fbKmCGPzBl4QZ4B+Po+ddvSZo/4Q5VhMrBXuxrJU=
 github.com/fxsml/gopipe/pipe v0.17.1/go.mod h1:1evEH1v3NmWwTFH//9gli/R4/pAJ9Ji8FcB7lfhg1rY=
+github.com/fxsml/gopipe/pipe v0.18.1-0.20260807051834-e1f82e6fe946 h1:6JN4MRyObubCuCAZ21DscPA24g6OaYtyOT2/JDWLHvo=
+github.com/fxsml/gopipe/pipe v0.18.1-0.20260807051834-e1f82e6fe946/go.mod h1:1evEH1v3NmWwTFH//9gli/R4/pAJ9Ji8FcB7lfhg1rY=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=

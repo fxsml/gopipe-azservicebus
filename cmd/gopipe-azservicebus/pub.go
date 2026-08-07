@@ -74,7 +74,7 @@ var (
 
 			var publishErrors atomic.Int64
 			publisher, err := servicebus.NewPublisher(sbClient, topic, servicebus.PublisherConfig{
-				ErrorHandler: func(batch []*message.RawMessage, err error) {
+				ErrorHandler: func(batch []*message.Message, err error) {
 					publishErrors.Add(int64(len(batch)))
 					slog.Error("Failed to publish batch", "count", len(batch), "error", err)
 				},
@@ -89,7 +89,7 @@ var (
 			}()
 
 			var (
-				ch         <-chan *message.RawMessage
+				ch         <-chan *message.Message
 				subscriber *jsonl.Subscriber
 			)
 
@@ -99,7 +99,7 @@ var (
 					slog.Error("Failed to parse message", "error", err)
 					return fmt.Errorf("parse json: %w", err)
 				}
-				msgCh := make(chan *message.RawMessage, 1)
+				msgCh := make(chan *message.Message, 1)
 				msgCh <- msg
 				close(msgCh)
 				ch = msgCh
