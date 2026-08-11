@@ -67,7 +67,7 @@ func TestSubscriber_ReceiveMessages(t *testing.T) {
 	}()
 
 	// Publish messages
-	msgs := make([]*message.RawMessage, len(testMessages))
+	msgs := make([]*message.Message, len(testMessages))
 	for i, id := range testMessages {
 		msgs[i] = message.NewRaw(
 			[]byte(fmt.Sprintf(`{"id":"%s"}`, id)),
@@ -193,7 +193,7 @@ func TestSubscriber_TimeToLiveMapping(t *testing.T) {
 	ttl := 5 * time.Minute
 	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{
 		Properties: gosb.PublisherProperties{
-			TimeToLive: func(*message.RawMessage) time.Duration { return ttl },
+			TimeToLive: func(*message.Message) time.Duration { return ttl },
 		},
 	})
 	require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestSubscriber_TimeToLiveMapping(t *testing.T) {
 
 	sub, err := gosb.NewSubscriber(client, topicSub, "test", gosb.SubscriberConfig{
 		Properties: gosb.SubscriberProperties{
-			TimeToLive: func(d time.Duration, msg *message.RawMessage) {
+			TimeToLive: func(d time.Duration, msg *message.Message) {
 				msg.Attributes[message.AttrExpiryTime] = time.Now().UTC().Add(d)
 			},
 		},
@@ -579,7 +579,7 @@ func TestSubscriber_BackpressureRespected(t *testing.T) {
 	require.NoError(t, err)
 
 	// Receive all messages without acking first (hold them)
-	heldMessages := make([]*message.RawMessage, 0, numMessages)
+	heldMessages := make([]*message.Message, 0, numMessages)
 receiveLoop:
 	for i := 0; i < numMessages; i++ {
 		select {
@@ -623,7 +623,7 @@ func TestSubscriber_PeekMode(t *testing.T) {
 	const numMessages = 3
 	msgIDs := []string{"peek-msg-1", "peek-msg-2", "peek-msg-3"}
 
-	rawMsgs := make([]*message.RawMessage, numMessages)
+	rawMsgs := make([]*message.Message, numMessages)
 	for i, id := range msgIDs {
 		rawMsgs[i] = message.NewRaw(
 			[]byte(fmt.Sprintf(`{"id":%q}`, id)),
@@ -715,7 +715,7 @@ func TestOrdering_GoroutineDispatch(t *testing.T) {
 
 			const numMessages = 5
 			publishedIDs := make([]string, numMessages)
-			rawMsgs := make([]*message.RawMessage, numMessages)
+			rawMsgs := make([]*message.Message, numMessages)
 			for i := range numMessages {
 				id := fmt.Sprintf("order-msg-%d", i+1)
 				publishedIDs[i] = id

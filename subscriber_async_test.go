@@ -75,7 +75,7 @@ func TestBackpressure(t *testing.T) {
 			received++
 			wg.Add(1)
 
-			go func(m *message.RawMessage) {
+			go func(m *message.Message) {
 				defer wg.Done()
 
 				// Track concurrency
@@ -164,7 +164,7 @@ func TestGracefulShutdown(t *testing.T) {
 	// Process messages slowly
 	go func() {
 		for msg := range msgChan {
-			go func(m *message.RawMessage) {
+			go func(m *message.Message) {
 				processingStarted.Done()
 				time.Sleep(2 * time.Second) // Simulate slow processing
 				m.Ack()

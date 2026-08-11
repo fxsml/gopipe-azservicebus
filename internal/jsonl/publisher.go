@@ -30,7 +30,7 @@ func NewPublisher(writer io.Writer, config PublisherConfig) *Publisher {
 	}
 }
 
-func (p *Publisher) Publish(ctx context.Context, in <-chan *message.RawMessage) (<-chan struct{}, error) {
+func (p *Publisher) Publish(ctx context.Context, in <-chan *message.Message) (<-chan struct{}, error) {
 	done := make(chan struct{})
 
 	go func() {
