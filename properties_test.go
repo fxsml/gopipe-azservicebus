@@ -12,12 +12,12 @@ import (
 
 // helpers
 
-func newTestMsg(attrs message.Attributes) *message.RawMessage {
+func newTestMsg(attrs message.Attributes) *message.Message {
 	return message.NewRaw([]byte(`{}`), attrs, nil)
 }
 
-func staticStr(s string) func(*message.RawMessage) string {
-	return func(*message.RawMessage) string { return s }
+func staticStr(s string) func(*message.Message) string {
+	return func(*message.Message) string { return s }
 }
 
 func newTestPublisher(pp PublisherProperties) *Publisher {
@@ -39,7 +39,8 @@ func TestToServiceBusMessage_PublisherPropertiesStatic(t *testing.T) {
 		Subject:          staticStr("my-subject"),
 		PartitionKey:     staticStr("part-key"),
 	})
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	require.NoError(t, err)
 
 	require.NotNil(t, sbMsg.SessionID)
 	assert.Equal(t, "sess-1", *sbMsg.SessionID)
@@ -57,20 +58,21 @@ func TestToServiceBusMessage_PublisherPropertiesStatic(t *testing.T) {
 
 func TestToServiceBusMessage_PublisherPropertiesFromMessage(t *testing.T) {
 	p := newTestPublisher(PublisherProperties{
-		SessionID: func(msg *message.RawMessage) string {
+		SessionID: func(msg *message.Message) string {
 			v, _ := msg.Attributes["sessionid"].(string)
 			return v
 		},
-		Subject: func(msg *message.RawMessage) string {
+		Subject: func(msg *message.Message) string {
 			v, _ := msg.Attributes["subject"].(string)
 			return v
 		},
 	})
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{
 		message.AttrID: "id",
 		"sessionid":    "sess-from-attr",
 		"subject":      "subject-from-attr",
 	}))
+	require.NoError(t, err)
 
 	require.NotNil(t, sbMsg.SessionID)
 	assert.Equal(t, "sess-from-attr", *sbMsg.SessionID)
@@ -80,7 +82,8 @@ func TestToServiceBusMessage_PublisherPropertiesFromMessage(t *testing.T) {
 
 func TestToServiceBusMessage_PublisherPropertiesNilFuncSkipped(t *testing.T) {
 	p := newTestPublisher(PublisherProperties{})
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	require.NoError(t, err)
 
 	assert.Nil(t, sbMsg.SessionID)
 	assert.Nil(t, sbMsg.ReplyTo)
@@ -94,17 +97,19 @@ func TestToServiceBusMessage_PublisherPropertiesNilFuncSkipped(t *testing.T) {
 
 func TestToServiceBusMessage_PublisherPropertiesEmptyStringSkipped(t *testing.T) {
 	p := newTestPublisher(PublisherProperties{
-		Subject: func(*message.RawMessage) string { return "" },
+		Subject: func(*message.Message) string { return "" },
 	})
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	require.NoError(t, err)
 	assert.Nil(t, sbMsg.Subject)
 }
 
 func TestToServiceBusMessage_PublisherPropertiesTimeToLive(t *testing.T) {
 	p := newTestPublisher(PublisherProperties{
-		TimeToLive: func(*message.RawMessage) time.Duration { return 5 * time.Minute },
+		TimeToLive: func(*message.Message) time.Duration { return 5 * time.Minute },
 	})
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	require.NoError(t, err)
 
 	require.NotNil(t, sbMsg.TimeToLive)
 	assert.Equal(t, 5*time.Minute, *sbMsg.TimeToLive)
@@ -112,15 +117,16 @@ func TestToServiceBusMessage_PublisherPropertiesTimeToLive(t *testing.T) {
 
 func TestToServiceBusMessage_PublisherPropertiesTimeToLiveZeroSkipped(t *testing.T) {
 	p := newTestPublisher(PublisherProperties{
-		TimeToLive: func(*message.RawMessage) time.Duration { return 0 },
+		TimeToLive: func(*message.Message) time.Duration { return 0 },
 	})
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	require.NoError(t, err)
 	assert.Nil(t, sbMsg.TimeToLive)
 }
 
 func TestToServiceBusMessage_PublisherPropertiesTimeToLiveFromExpiryTime(t *testing.T) {
 	p := newTestPublisher(PublisherProperties{
-		TimeToLive: func(msg *message.RawMessage) time.Duration {
+		TimeToLive: func(msg *message.Message) time.Duration {
 			if exp := msg.ExpiryTime(); !exp.IsZero() {
 				if d := time.Until(exp); d > 0 {
 					return d
@@ -130,10 +136,11 @@ func TestToServiceBusMessage_PublisherPropertiesTimeToLiveFromExpiryTime(t *test
 		},
 	})
 	expiry := time.Now().Add(10 * time.Minute)
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{
 		message.AttrID:         "id",
 		message.AttrExpiryTime: expiry,
 	}))
+	require.NoError(t, err)
 
 	require.NotNil(t, sbMsg.TimeToLive)
 	assert.InDelta(t, (10 * time.Minute).Seconds(), sbMsg.TimeToLive.Seconds(), 1)
@@ -142,13 +149,14 @@ func TestToServiceBusMessage_PublisherPropertiesTimeToLiveFromExpiryTime(t *test
 func TestToServiceBusMessage_ScheduledEnqueueTime(t *testing.T) {
 	delay := 5 * time.Minute
 	p := newTestPublisher(PublisherProperties{
-		ScheduledEnqueueTime: func(*message.RawMessage) time.Time {
+		ScheduledEnqueueTime: func(*message.Message) time.Time {
 			return time.Now().UTC().Add(delay)
 		},
 	})
 
 	before := time.Now().UTC()
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	require.NoError(t, err)
 	after := time.Now().UTC()
 
 	require.NotNil(t, sbMsg.ScheduledEnqueueTime)
@@ -157,9 +165,10 @@ func TestToServiceBusMessage_ScheduledEnqueueTime(t *testing.T) {
 
 func TestToServiceBusMessage_ScheduledEnqueueTimeZeroSkipped(t *testing.T) {
 	p := newTestPublisher(PublisherProperties{
-		ScheduledEnqueueTime: func(*message.RawMessage) time.Time { return time.Time{} },
+		ScheduledEnqueueTime: func(*message.Message) time.Time { return time.Time{} },
 	})
-	sbMsg := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	sbMsg, err := p.toServiceBusMessage(newTestMsg(message.Attributes{message.AttrID: "id"}))
+	require.NoError(t, err)
 	assert.Nil(t, sbMsg.ScheduledEnqueueTime)
 }
 
@@ -184,7 +193,7 @@ func TestSubscriberProperties_NilBrokerFieldSkipped(t *testing.T) {
 	called := false
 	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
 	sp := SubscriberProperties{
-		SessionID: func(v string, m *message.RawMessage) { called = true },
+		SessionID: func(v string, m *message.Message) { called = true },
 	}
 	sp.apply(sbMsg, msg)
 
@@ -198,7 +207,7 @@ func TestSubscriberProperties_SessionID(t *testing.T) {
 
 	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
 	sp := SubscriberProperties{
-		SessionID: func(v string, m *message.RawMessage) { m.Attributes["sessionid"] = v },
+		SessionID: func(v string, m *message.Message) { m.Attributes["sessionid"] = v },
 	}
 	sp.apply(sbMsg, msg)
 
@@ -217,12 +226,12 @@ func TestSubscriberProperties_AllStringFields(t *testing.T) {
 
 	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
 	sp := SubscriberProperties{
-		SessionID:        func(v string, m *message.RawMessage) { m.Attributes["sessionid"] = v },
-		ReplyTo:          func(v string, m *message.RawMessage) { m.Attributes["replyto"] = v },
-		ReplyToSessionID: func(v string, m *message.RawMessage) { m.Attributes["replytosessionid"] = v },
-		To:               func(v string, m *message.RawMessage) { m.Attributes["to"] = v },
-		Subject:          func(v string, m *message.RawMessage) { m.Attributes["subject"] = v },
-		PartitionKey:     func(v string, m *message.RawMessage) { m.Attributes["partitionkey"] = v },
+		SessionID:        func(v string, m *message.Message) { m.Attributes["sessionid"] = v },
+		ReplyTo:          func(v string, m *message.Message) { m.Attributes["replyto"] = v },
+		ReplyToSessionID: func(v string, m *message.Message) { m.Attributes["replytosessionid"] = v },
+		To:               func(v string, m *message.Message) { m.Attributes["to"] = v },
+		Subject:          func(v string, m *message.Message) { m.Attributes["subject"] = v },
+		PartitionKey:     func(v string, m *message.Message) { m.Attributes["partitionkey"] = v },
 	}
 	sp.apply(sbMsg, msg)
 
@@ -241,7 +250,7 @@ func TestSubscriberProperties_TimeToLive(t *testing.T) {
 
 	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
 	sp := SubscriberProperties{
-		TimeToLive: func(d time.Duration, m *message.RawMessage) {
+		TimeToLive: func(d time.Duration, m *message.Message) {
 			m.Attributes[message.AttrExpiryTime] = time.Now().UTC().Add(d)
 		},
 	}
@@ -259,7 +268,7 @@ func TestSubscriberProperties_ScheduledEnqueueTime(t *testing.T) {
 
 	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
 	sp := SubscriberProperties{
-		ScheduledEnqueueTime: func(t time.Time, m *message.RawMessage) {
+		ScheduledEnqueueTime: func(t time.Time, m *message.Message) {
 			m.Attributes["scheduledenqueuetime"] = t
 		},
 	}

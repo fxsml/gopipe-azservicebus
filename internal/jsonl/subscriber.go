@@ -37,8 +37,8 @@ func NewSubscriber(reader io.Reader, config SubscriberConfig) *Subscriber {
 	}
 }
 
-func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.RawMessage, error) {
-	ch := make(chan *message.RawMessage, s.config.BufferSize)
+func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
+	ch := make(chan *message.Message, s.config.BufferSize)
 
 	go func() {
 		defer close(ch)

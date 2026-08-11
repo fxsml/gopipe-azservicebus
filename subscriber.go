@@ -74,19 +74,19 @@ type SubscriberConfig struct {
 
 // SubscriberProperties holds per-field mapping functions from Azure Service Bus broker
 // properties to the received gopipe message. Functions receive the dereferenced property
-// value and a mutable *message.RawMessage and may write to msg.Attributes freely.
+// value and a mutable *message.Message and may write to msg.Attributes freely.
 type SubscriberProperties struct {
-	SessionID            func(string, *message.RawMessage)
-	ReplyTo              func(string, *message.RawMessage)
-	ReplyToSessionID     func(string, *message.RawMessage)
-	To                   func(string, *message.RawMessage)
-	Subject              func(string, *message.RawMessage)
-	PartitionKey         func(string, *message.RawMessage)
-	TimeToLive           func(time.Duration, *message.RawMessage)
-	ScheduledEnqueueTime func(time.Time, *message.RawMessage)
+	SessionID            func(string, *message.Message)
+	ReplyTo              func(string, *message.Message)
+	ReplyToSessionID     func(string, *message.Message)
+	To                   func(string, *message.Message)
+	Subject              func(string, *message.Message)
+	PartitionKey         func(string, *message.Message)
+	TimeToLive           func(time.Duration, *message.Message)
+	ScheduledEnqueueTime func(time.Time, *message.Message)
 }
 
-func (sp SubscriberProperties) apply(sbMsg *azservicebus.ReceivedMessage, msg *message.RawMessage) {
+func (sp SubscriberProperties) apply(sbMsg *azservicebus.ReceivedMessage, msg *message.Message) {
 	if sp.SessionID != nil && sbMsg.SessionID != nil {
 		sp.SessionID(*sbMsg.SessionID, msg)
 	}
@@ -248,7 +248,7 @@ func createReceiver(client *azservicebus.Client, topic string) (*azservicebus.Re
 //
 // IMPORTANT: This method now updates semaphore metrics with pipeline/subscription labels.
 // On first Subscribe() call, the semaphore labels are set and cannot be changed afterward.
-func (s *Subscriber) Subscribe(ctx context.Context, pipeline string) (<-chan *message.RawMessage, error) {
+func (s *Subscriber) Subscribe(ctx context.Context, pipeline string) (<-chan *message.Message, error) {
 	// Check if subscriber is permanently closed
 	if s.closed.Load() {
 		return nil, ErrSubscriberClosed
@@ -273,7 +273,7 @@ func (s *Subscriber) Subscribe(ctx context.Context, pipeline string) (<-chan *me
 	s.subWg.Add(1)
 	s.subMu.Unlock()
 
-	msgChan := make(chan *message.RawMessage, s.config.MaxInFlight)
+	msgChan := make(chan *message.Message, s.config.MaxInFlight)
 
 	go func() {
 		defer s.subWg.Done()
@@ -469,7 +469,7 @@ func getErrorCode(err error) string {
 func (s *Subscriber) handle(
 	receiver *azservicebus.Receiver,
 	msg *azservicebus.ReceivedMessage,
-	msgChan chan<- *message.RawMessage,
+	msgChan chan<- *message.Message,
 	abort <-chan struct{},
 	pipeline string,
 	receiveTime time.Time,

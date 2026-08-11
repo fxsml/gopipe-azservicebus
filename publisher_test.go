@@ -71,7 +71,7 @@ func TestPublisher_PublishBatch(t *testing.T) {
 
 	// Publish all batches
 	for i, batch := range batches {
-		msgs := make([]*message.RawMessage, len(batch))
+		msgs := make([]*message.Message, len(batch))
 		for j, id := range batch {
 			msgs[j] = message.NewRaw(
 				[]byte(fmt.Sprintf(`{"id":"%s"}`, id)),
@@ -131,7 +131,7 @@ func TestPublisher_AcksMessagesOnSuccess(t *testing.T) {
 	nacked := make([]bool, numMessages)
 	var nackErrs [numMessages]error
 
-	messages := make([]*message.RawMessage, numMessages)
+	messages := make([]*message.Message, numMessages)
 	for i := range numMessages {
 		idx := i // capture loop variable
 		acking := message.NewAcking(
@@ -177,7 +177,7 @@ func TestPublisher_NacksMessagesOnError(t *testing.T) {
 	nacked := make([]bool, numMessages)
 	var nackErrs [numMessages]error
 
-	messages := make([]*message.RawMessage, numMessages)
+	messages := make([]*message.Message, numMessages)
 	for i := range numMessages {
 		idx := i
 		acking := message.NewAcking(
@@ -530,7 +530,7 @@ func TestPublisher_ConcurrentStreamsPublishing(t *testing.T) {
 
 			for batchNum := 0; batchNum < batchesPerStream; batchNum++ {
 				// Each stream publishes batches (simulating pipeline output)
-				msgs := make([]*message.RawMessage, messagesPerBatch)
+				msgs := make([]*message.Message, messagesPerBatch)
 				for i := 0; i < messagesPerBatch; i++ {
 					id := fmt.Sprintf("stream%d-batch%d-msg%d", sid, batchNum, i)
 					msgs[i] = message.NewRaw(
@@ -640,7 +640,7 @@ func TestPublisher_StreamingPublish(t *testing.T) {
 	}()
 
 	// Create input channel and start streaming publish
-	inputChan := make(chan *message.RawMessage, numMessages)
+	inputChan := make(chan *message.Message, numMessages)
 	done, err := pub.Publish(ctx, "test", inputChan)
 	require.NoError(t, err)
 
@@ -695,13 +695,13 @@ func TestPublisher_StreamingPublishErrorHandler(t *testing.T) {
 	// Track error handler calls
 	var errorHandlerMu sync.Mutex
 	errorHandlerCalled := false
-	var capturedBatch []*message.RawMessage
+	var capturedBatch []*message.Message
 	var capturedErr error
 
 	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{
 		BatchSize:    5,
 		BatchTimeout: 100 * time.Millisecond,
-		ErrorHandler: func(batch []*message.RawMessage, err error) {
+		ErrorHandler: func(batch []*message.Message, err error) {
 			errorHandlerMu.Lock()
 			defer errorHandlerMu.Unlock()
 			errorHandlerCalled = true
@@ -715,7 +715,7 @@ func TestPublisher_StreamingPublishErrorHandler(t *testing.T) {
 	pub.Close()
 
 	// Try streaming publish on closed publisher
-	inputChan := make(chan *message.RawMessage)
+	inputChan := make(chan *message.Message)
 	_, err = pub.Publish(ctx, "test", inputChan)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, gosb.ErrPublisherClosed)
@@ -741,7 +741,7 @@ func TestPublisher_ScheduledEnqueueTime(t *testing.T) {
 	delay := 10 * time.Second
 	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{
 		Properties: gosb.PublisherProperties{
-			ScheduledEnqueueTime: func(*message.RawMessage) time.Time {
+			ScheduledEnqueueTime: func(*message.Message) time.Time {
 				return time.Now().UTC().Add(delay)
 			},
 		},
