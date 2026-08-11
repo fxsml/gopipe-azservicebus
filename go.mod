@@ -5,8 +5,8 @@ go 1.24.7
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0
-	github.com/fxsml/gopipe/message v0.18.1-0.20260807051834-e1f82e6fe946
-	github.com/fxsml/gopipe/pipe v0.18.1-0.20260807051834-e1f82e6fe946
+	github.com/fxsml/gopipe/message v0.19.0
+	github.com/fxsml/gopipe/pipe v0.19.0
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/stretchr/testify v1.11.1
@@ -22,7 +22,7 @@ require (
 	github.com/Azure/go-amqp v1.4.0 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/fxsml/gopipe/channel v0.16.0 // indirect
+	github.com/fxsml/gopipe/channel v0.19.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
