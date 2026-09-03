@@ -41,6 +41,14 @@ var (
 		Aliases: []string{"p"},
 		Usage:   "peek mode; true if you want to use non-destructive peek mode",
 	}
+	sbDlqFlag = &cli.BoolFlag{
+		Name:  "dlq",
+		Usage: "receive from the dead-letter sub-queue instead of the main queue/subscription",
+	}
+	sbTransferDlqFlag = &cli.BoolFlag{
+		Name:  "transfer-dlq",
+		Usage: "receive from the transfer dead-letter sub-queue instead of the main queue/subscription",
+	}
 
 	// subscribe command
 
@@ -80,8 +88,17 @@ var (
 				return fmt.Errorf("create ServiceBus client: %w", err)
 			}
 
+			subQueue := servicebus.SubQueueNone
+			switch {
+			case cmd.Bool("dlq"):
+				subQueue = servicebus.SubQueueDeadLetter
+			case cmd.Bool("transfer-dlq"):
+				subQueue = servicebus.SubQueueTransferDeadLetter
+			}
+
 			cfg := servicebus.SubscriberConfig{
 				EnablePeekMode: cmd.Bool("peek"),
+				SubQueue:       subQueue,
 			}
 			if limit > 0 {
 				// MaxInFlight=1 ensures no next message is prefetched before Ack(),
@@ -127,6 +144,14 @@ var (
 			sbLimitFlag,
 			sbOutputFileFlag,
 			sbPeekFlag,
+		},
+		MutuallyExclusiveFlags: []cli.MutuallyExclusiveFlags{
+			{
+				Flags: [][]cli.Flag{
+					{sbDlqFlag},
+					{sbTransferDlqFlag},
+				},
+			},
 		},
 	}
 )
