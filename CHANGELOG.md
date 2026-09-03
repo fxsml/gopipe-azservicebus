@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SubscriberConfig.SubQueue` to subscribe to a queue/subscription's dead-letter or transfer dead-letter sub-queue; `DeadLetterReason`/`DeadLetterErrorDescription` mapping on `SubscriberProperties`; `--dlq`/`--transfer-dlq` flags on the `sub` CLI command
+
 ## [v0.2.0] - 2026-08-11
 
 ### Added

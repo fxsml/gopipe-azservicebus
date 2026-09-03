@@ -10,6 +10,7 @@ import (
 
 	gosb "github.com/fxsml/gopipe-azservicebus"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/fxsml/gopipe/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -687,6 +688,82 @@ func TestSubscriber_PeekMode(t *testing.T) {
 			"peek mode must not lock or abandon messages; DeliveryCount > 1 means redelivery occurred (message %s has DeliveryCount=%d)",
 			m.MessageID, m.DeliveryCount)
 	}
+}
+
+func TestSubscriber_DeadLetterSubQueue(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	topicName, subName, cleanup := testTopicSetup(t, ctx)
+	defer cleanup()
+
+	topicSub := fmt.Sprintf("%s/%s", topicName, subName)
+
+	pub, err := gosb.NewPublisher(client, topicName, gosb.PublisherConfig{})
+	require.NoError(t, err)
+	defer pub.Close()
+
+	msgID := "dlq-test-msg"
+	err = pub.PublishBatch(ctx, "test", message.NewRaw(
+		[]byte(`{"test":"dlq"}`),
+		message.Attributes{message.AttrID: msgID},
+		nil,
+	))
+	require.NoError(t, err)
+	t.Log("Published message")
+
+	// Dead-letter the message via the raw SDK, bypassing our Subscriber, to seed the DLQ
+	// the same way Service Bus itself would after delivery-rule failures.
+	mainReceiver, err := client.NewReceiverForSubscription(topicName, subName, nil)
+	require.NoError(t, err)
+	defer mainReceiver.Close(ctx)
+
+	received, err := mainReceiver.ReceiveMessages(ctx, 1, nil)
+	require.NoError(t, err)
+	require.Len(t, received, 1)
+	require.Equal(t, msgID, received[0].MessageID)
+
+	reason := "test-reason"
+	description := "dead-lettered by TestSubscriber_DeadLetterSubQueue"
+	err = mainReceiver.DeadLetterMessage(ctx, received[0], &azservicebus.DeadLetterOptions{
+		Reason:           &reason,
+		ErrorDescription: &description,
+	})
+	require.NoError(t, err)
+	t.Log("Dead-lettered message via raw SDK")
+
+	// Subscribe to the DLQ sub-queue and verify both the message and the mapped
+	// DeadLetterReason/DeadLetterErrorDescription properties.
+	sub, err := gosb.NewSubscriber(client, topicSub, "test", gosb.SubscriberConfig{
+		SubQueue: gosb.SubQueueDeadLetter,
+		Properties: gosb.SubscriberProperties{
+			DeadLetterReason: func(v string, m *message.Message) {
+				m.Attributes["deadletterreason"] = v
+			},
+			DeadLetterErrorDescription: func(v string, m *message.Message) {
+				m.Attributes["deadlettererrordescription"] = v
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	msgChan, err := sub.Subscribe(ctx, "test")
+	require.NoError(t, err)
+
+	select {
+	case dlqMsg := <-msgChan:
+		assert.Equal(t, msgID, dlqMsg.ID())
+		assert.Equal(t, reason, dlqMsg.Attributes["deadletterreason"])
+		assert.Equal(t, description, dlqMsg.Attributes["deadlettererrordescription"])
+		dlqMsg.Ack()
+		t.Log("Received and acked message from dead-letter sub-queue")
+	case <-time.After(15 * time.Second):
+		t.Fatal("Timeout waiting for message on dead-letter sub-queue")
+	}
+
+	// Close blocks until the Ack above has actually settled with the broker, so the
+	// deferred cleanup doesn't delete the topic while completion is still in flight.
+	require.NoError(t, sub.Close())
 }
 
 // TestOrdering_GoroutineDispatch shows that channel delivery order is non-deterministic in both
