@@ -9,6 +9,7 @@ import (
 
 	servicebus "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe-azservicebus/internal/jsonl"
+	"github.com/fxsml/gopipe/message"
 	"github.com/urfave/cli/v3"
 )
 
@@ -102,7 +103,7 @@ var (
 			}
 			if limit > 0 {
 				// MaxInFlight=1 ensures no next message is prefetched before Ack(),
-				// so cancel() in the loop below stops intake cleanly at the limit.
+				// so limitMessages below can stop intake cleanly at the limit.
 				cfg.MaxInFlight = 1
 			}
 
@@ -115,6 +116,9 @@ var (
 			msgs, err := subscriber.Subscribe(ctx, cliPipeline)
 			if err != nil {
 				return fmt.Errorf("start subscriber for %s: %w", subscription, err)
+			}
+			if limit > 0 {
+				msgs = limitMessages(msgs, limit, cancel)
 			}
 
 			publisher := jsonl.NewPublisher(writer, jsonl.PublisherConfig{})
@@ -155,3 +159,24 @@ var (
 		},
 	}
 )
+
+// limitMessages forwards at most n messages from in, then calls cancel to stop
+// further intake and closes the returned channel once the nth message has been
+// forwarded. Each forwarded message is handed off before the limit is enforced,
+// so the caller remains responsible for settling it as usual.
+func limitMessages(in <-chan *message.Message, n int, cancel context.CancelFunc) <-chan *message.Message {
+	out := make(chan *message.Message)
+	go func() {
+		defer close(out)
+		count := 0
+		for msg := range in {
+			out <- msg
+			count++
+			if count >= n {
+				cancel()
+				return
+			}
+		}
+	}()
+	return out
+}

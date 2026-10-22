@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `sub` CLI command: `--limit` flag was parsed but never enforced, so it read messages until `--timeout` instead of stopping after the configured count
+
 ## [v0.3.0] - 2026-10-22
 
 ### Added
