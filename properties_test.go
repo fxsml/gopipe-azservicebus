@@ -278,3 +278,53 @@ func TestSubscriberProperties_ScheduledEnqueueTime(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, scheduled, got)
 }
+
+func TestSubscriberProperties_DeadLetterReason(t *testing.T) {
+	sbMsg := newReceivedMessage()
+	reason := "MaxDeliveryCountExceeded"
+	sbMsg.DeadLetterReason = &reason
+
+	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
+	sp := SubscriberProperties{
+		DeadLetterReason: func(v string, m *message.Message) { m.Attributes["deadletterreason"] = v },
+	}
+	sp.apply(sbMsg, msg)
+
+	assert.Equal(t, "MaxDeliveryCountExceeded", msg.Attributes["deadletterreason"])
+}
+
+func TestSubscriberProperties_DeadLetterErrorDescription(t *testing.T) {
+	sbMsg := newReceivedMessage()
+	desc := "Message exceeded max delivery count of 10"
+	sbMsg.DeadLetterErrorDescription = &desc
+
+	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
+	sp := SubscriberProperties{
+		DeadLetterErrorDescription: func(v string, m *message.Message) { m.Attributes["deadlettererrordescription"] = v },
+	}
+	sp.apply(sbMsg, msg)
+
+	assert.Equal(t, "Message exceeded max delivery count of 10", msg.Attributes["deadlettererrordescription"])
+}
+
+func TestSubscriberProperties_DeadLetterFieldsNilBrokerFieldSkipped(t *testing.T) {
+	sbMsg := newReceivedMessage() // DeadLetterReason/DeadLetterErrorDescription are nil
+
+	called := false
+	msg := message.NewRaw([]byte{}, message.Attributes{}, nil)
+	sp := SubscriberProperties{
+		DeadLetterReason:           func(v string, m *message.Message) { called = true },
+		DeadLetterErrorDescription: func(v string, m *message.Message) { called = true },
+	}
+	sp.apply(sbMsg, msg)
+
+	assert.False(t, called, "funcs should not be called when broker fields are nil")
+}
+
+// SubQueue unit tests
+
+func TestSubQueue_ToAzure(t *testing.T) {
+	assert.Equal(t, azservicebus.SubQueue(0), SubQueueNone.toAzure())
+	assert.Equal(t, azservicebus.SubQueueDeadLetter, SubQueueDeadLetter.toAzure())
+	assert.Equal(t, azservicebus.SubQueueTransfer, SubQueueTransferDeadLetter.toAzure())
+}

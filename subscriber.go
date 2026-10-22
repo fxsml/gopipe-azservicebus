@@ -19,6 +19,37 @@ import (
 // DefaultLockRenewalInterval is the fallback renewal interval when LockedUntil is unavailable.
 const DefaultLockRenewalInterval = 30 * time.Second
 
+// SubQueue selects a Service Bus sub-queue to receive from instead of the
+// main queue or subscription.
+type SubQueue int
+
+const (
+	// SubQueueNone receives from the main queue or subscription. This is the default.
+	SubQueueNone SubQueue = iota
+
+	// SubQueueDeadLetter receives from the dead-letter sub-queue, which holds messages
+	// rejected by normal delivery rules (max delivery count exceeded, TTL expired,
+	// or explicitly dead-lettered).
+	SubQueueDeadLetter
+
+	// SubQueueTransferDeadLetter receives from the transfer dead-letter sub-queue, which
+	// holds messages that permanently failed while being auto-forwarded to another
+	// queue or topic. Only relevant when the entity uses auto-forwarding (ForwardTo).
+	SubQueueTransferDeadLetter
+)
+
+// toAzure maps SubQueue onto the Azure SDK's equivalent type.
+func (sq SubQueue) toAzure() azservicebus.SubQueue {
+	switch sq {
+	case SubQueueDeadLetter:
+		return azservicebus.SubQueueDeadLetter
+	case SubQueueTransferDeadLetter:
+		return azservicebus.SubQueueTransfer
+	default:
+		return 0
+	}
+}
+
 // SubscriberConfig contains configuration for the Subscriber.
 type SubscriberConfig struct {
 	// Logger for the subscriber. Defaults to slog.Default().
@@ -70,6 +101,10 @@ type SubscriberConfig struct {
 	// PeekPollInterval is the delay between poll attempts when no messages are available
 	// in peek mode. Ignored when EnablePeekMode is false. Defaults to 1 second.
 	PeekPollInterval time.Duration
+
+	// SubQueue selects a sub-queue to receive from instead of the main queue/subscription.
+	// Defaults to SubQueueNone (the main queue/subscription).
+	SubQueue SubQueue
 }
 
 // SubscriberProperties holds per-field mapping functions from Azure Service Bus broker
@@ -84,6 +119,16 @@ type SubscriberProperties struct {
 	PartitionKey         func(string, *message.Message)
 	TimeToLive           func(time.Duration, *message.Message)
 	ScheduledEnqueueTime func(time.Time, *message.Message)
+
+	// DeadLetterReason is set by the broker when a message was dead-lettered. Populated
+	// regardless of which sub-queue is being read; typically only useful when SubQueue
+	// is SubQueueDeadLetter or SubQueueTransferDeadLetter.
+	DeadLetterReason func(string, *message.Message)
+
+	// DeadLetterErrorDescription is set by the broker when a message was dead-lettered.
+	// Populated regardless of which sub-queue is being read; typically only useful when
+	// SubQueue is SubQueueDeadLetter or SubQueueTransferDeadLetter.
+	DeadLetterErrorDescription func(string, *message.Message)
 }
 
 func (sp SubscriberProperties) apply(sbMsg *azservicebus.ReceivedMessage, msg *message.Message) {
@@ -110,6 +155,12 @@ func (sp SubscriberProperties) apply(sbMsg *azservicebus.ReceivedMessage, msg *m
 	}
 	if sp.ScheduledEnqueueTime != nil && sbMsg.ScheduledEnqueueTime != nil {
 		sp.ScheduledEnqueueTime(*sbMsg.ScheduledEnqueueTime, msg)
+	}
+	if sp.DeadLetterReason != nil && sbMsg.DeadLetterReason != nil {
+		sp.DeadLetterReason(*sbMsg.DeadLetterReason, msg)
+	}
+	if sp.DeadLetterErrorDescription != nil && sbMsg.DeadLetterErrorDescription != nil {
+		sp.DeadLetterErrorDescription(*sbMsg.DeadLetterErrorDescription, msg)
 	}
 }
 
@@ -191,7 +242,7 @@ func NewSubscriber(client *azservicebus.Client, topic, pipeline string, config S
 	config = config.withDefaults()
 
 	// Create receiver immediately (fail fast)
-	receiver, err := createReceiver(client, topic)
+	receiver, err := createReceiver(client, topic, config.SubQueue)
 	if err != nil {
 		return nil, fmt.Errorf("create receiver for %s: %w", topic, err)
 	}
@@ -216,15 +267,15 @@ func NewSubscriber(client *azservicebus.Client, topic, pipeline string, config S
 	}, nil
 }
 
-func createReceiver(client *azservicebus.Client, topic string) (*azservicebus.Receiver, error) {
-	if parts := strings.Split(topic, "/"); len(parts) == 2 {
-		return client.NewReceiverForSubscription(parts[0], parts[1], &azservicebus.ReceiverOptions{
-			ReceiveMode: azservicebus.ReceiveModePeekLock,
-		})
-	}
-	return client.NewReceiverForQueue(topic, &azservicebus.ReceiverOptions{
+func createReceiver(client *azservicebus.Client, topic string, subQueue SubQueue) (*azservicebus.Receiver, error) {
+	opts := &azservicebus.ReceiverOptions{
 		ReceiveMode: azservicebus.ReceiveModePeekLock,
-	})
+		SubQueue:    subQueue.toAzure(),
+	}
+	if parts := strings.Split(topic, "/"); len(parts) == 2 {
+		return client.NewReceiverForSubscription(parts[0], parts[1], opts)
+	}
+	return client.NewReceiverForQueue(topic, opts)
 }
 
 // Subscribe starts receiving messages and returns a channel.
@@ -406,7 +457,7 @@ func (s *Subscriber) reconnect() error {
 	cancel()
 
 	// Create new receiver
-	receiver, err := createReceiver(s.client, s.topic)
+	receiver, err := createReceiver(s.client, s.topic, s.config.SubQueue)
 	if err != nil {
 		return err
 	}
