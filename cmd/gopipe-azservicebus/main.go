@@ -18,6 +18,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := rootCmd.Run(context.Background(), os.Args); err != nil {
+		slog.Error("Command failed", "error", err)
 		os.Exit(1)
 	}
 }
