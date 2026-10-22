@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-10-22
+
 ### Fixed
 
 - `sub` CLI command: `--limit` flag was parsed but never enforced, so it read messages until `--timeout` instead of stopping after the configured count
+- CLI no longer exits silently on command failure; errors are now logged before exit, and `pub`'s input-file-open error is wrapped with context
 
 ## [v0.3.0] - 2026-10-22
 
@@ -41,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Subscriber now processes Phase 1 synchronously to preserve message ordering
 - CLI flag naming: `-T`/`--topic` for publish, `-t`/`--timeout` for subscribe
 
+[v0.3.1]: https://github.com/fxsml/gopipe-azservicebus/releases/tag/v0.3.1
 [v0.3.0]: https://github.com/fxsml/gopipe-azservicebus/releases/tag/v0.3.0
 [v0.2.0]: https://github.com/fxsml/gopipe-azservicebus/releases/tag/v0.2.0
 [v0.1.0]: https://github.com/fxsml/gopipe-azservicebus/releases/tag/v0.1.0
