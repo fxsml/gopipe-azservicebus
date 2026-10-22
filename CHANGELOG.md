@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-22
+
 ### Added
 
 - `SubscriberConfig.SubQueue` to subscribe to a queue/subscription's dead-letter or transfer dead-letter sub-queue; `DeadLetterReason`/`DeadLetterErrorDescription` mapping on `SubscriberProperties`; `--dlq`/`--transfer-dlq` flags on the `sub` CLI command
@@ -35,5 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Subscriber now processes Phase 1 synchronously to preserve message ordering
 - CLI flag naming: `-T`/`--topic` for publish, `-t`/`--timeout` for subscribe
 
+[v0.3.0]: https://github.com/fxsml/gopipe-azservicebus/releases/tag/v0.3.0
 [v0.2.0]: https://github.com/fxsml/gopipe-azservicebus/releases/tag/v0.2.0
 [v0.1.0]: https://github.com/fxsml/gopipe-azservicebus/releases/tag/v0.1.0
