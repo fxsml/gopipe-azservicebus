@@ -49,7 +49,7 @@ var (
 			} else {
 				f, err := os.Open(inputFile)
 				if err != nil {
-					return err
+					return fmt.Errorf("open input file: %w", err)
 				}
 				defer func(f *os.File) {
 					if err := f.Close(); err != nil {
