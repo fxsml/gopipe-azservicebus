@@ -328,3 +328,28 @@ func TestSubQueue_ToAzure(t *testing.T) {
 	assert.Equal(t, azservicebus.SubQueueDeadLetter, SubQueueDeadLetter.toAzure())
 	assert.Equal(t, azservicebus.SubQueueTransfer, SubQueueTransferDeadLetter.toAzure())
 }
+
+func TestSubscriberProperties_BrokerMetadata(t *testing.T) {
+	enq := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	seq := int64(42)
+	sb := &azservicebus.ReceivedMessage{EnqueuedTime: &enq, DeliveryCount: 3, SequenceNumber: &seq}
+
+	var gotTime time.Time
+	var gotCount uint32
+	var gotSeq int64
+	sp := SubscriberProperties{
+		EnqueuedTime:   func(v time.Time, _ *message.Message) { gotTime = v },
+		DeliveryCount:  func(v uint32, _ *message.Message) { gotCount = v },
+		SequenceNumber: func(v int64, _ *message.Message) { gotSeq = v },
+	}
+	sp.apply(sb, newTestMsg(nil))
+
+	assert.Equal(t, enq, gotTime)
+	assert.Equal(t, uint32(3), gotCount)
+	assert.Equal(t, int64(42), gotSeq)
+
+	// unset pointers must not call the mapping functions
+	gotSeq = 0
+	sp.apply(newReceivedMessage(), newTestMsg(nil))
+	assert.Zero(t, gotSeq)
+}

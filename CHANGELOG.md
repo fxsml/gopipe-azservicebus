@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `EnqueuedTime`, `DeliveryCount` and `SequenceNumber` mapping functions on `SubscriberProperties`
+- `sub --broker-props` flag (opt-in) that adds `sbdeadletterreason`, `sbdeadlettererrordescription`, `sbenqueuedtime`, `sbdeliverycount` and `sbsequencenumber` extension attributes to the output
+
 ## [v0.3.1] - 2026-10-22
 
 ### Fixed

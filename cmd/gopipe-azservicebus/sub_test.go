@@ -162,3 +162,20 @@ func readNonEmptyLines(t *testing.T, path string) []string {
 	require.NoError(t, sc.Err())
 	return lines
 }
+
+func TestBrokerPropsMapping_AttributeNames(t *testing.T) {
+	sp := brokerPropsMapping()
+	msg := message.NewRaw([]byte(`{}`), nil, nil)
+
+	sp.DeadLetterReason("MaxDeliveryCountExceeded", msg)
+	sp.DeadLetterErrorDescription("too many", msg)
+	sp.EnqueuedTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), msg)
+	sp.DeliveryCount(10, msg)
+	sp.SequenceNumber(7, msg)
+
+	assert.Equal(t, "MaxDeliveryCountExceeded", msg.Attributes["sbdeadletterreason"])
+	assert.Equal(t, "too many", msg.Attributes["sbdeadlettererrordescription"])
+	assert.Equal(t, "2026-01-02T03:04:05Z", msg.Attributes["sbenqueuedtime"])
+	assert.Equal(t, int64(10), msg.Attributes["sbdeliverycount"])
+	assert.Equal(t, int64(7), msg.Attributes["sbsequencenumber"])
+}

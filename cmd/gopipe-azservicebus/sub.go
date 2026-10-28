@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	servicebus "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe-azservicebus/internal/jsonl"
@@ -49,6 +50,10 @@ var (
 	sbTransferDlqFlag = &cli.BoolFlag{
 		Name:  "transfer-dlq",
 		Usage: "receive from the transfer dead-letter sub-queue instead of the main queue/subscription",
+	}
+	sbBrokerPropsFlag = &cli.BoolFlag{
+		Name:  "broker-props",
+		Usage: "add broker metadata (dead-letter reason/description, enqueued time, delivery count, sequence number) as sb* extension attributes; off by default because piping the output into pub publishes them as message properties",
 	}
 
 	// subscribe command
@@ -101,6 +106,9 @@ var (
 				EnablePeekMode: cmd.Bool("peek"),
 				SubQueue:       subQueue,
 			}
+			if cmd.Bool("broker-props") {
+				cfg.Properties = brokerPropsMapping()
+			}
 			if limit > 0 {
 				// MaxInFlight=1 ensures no next message is prefetched before Ack(),
 				// so limitMessages below can stop intake cleanly at the limit.
@@ -148,6 +156,7 @@ var (
 			sbLimitFlag,
 			sbOutputFileFlag,
 			sbPeekFlag,
+			sbBrokerPropsFlag,
 		},
 		MutuallyExclusiveFlags: []cli.MutuallyExclusiveFlags{
 			{
@@ -159,6 +168,36 @@ var (
 		},
 	}
 )
+
+// brokerPropsMapping maps broker metadata onto CloudEvents extension attributes.
+// Names are lowercase a-z0-9 as required by the CloudEvents spec.
+func brokerPropsMapping() servicebus.SubscriberProperties {
+	set := func(name string) func(any, *message.Message) {
+		return func(v any, m *message.Message) {
+			if m.Attributes == nil {
+				m.Attributes = message.Attributes{}
+			}
+			m.Attributes[name] = v
+		}
+	}
+	return servicebus.SubscriberProperties{
+		DeadLetterReason: func(v string, m *message.Message) {
+			set("sbdeadletterreason")(v, m)
+		},
+		DeadLetterErrorDescription: func(v string, m *message.Message) {
+			set("sbdeadlettererrordescription")(v, m)
+		},
+		EnqueuedTime: func(v time.Time, m *message.Message) {
+			set("sbenqueuedtime")(v.UTC().Format(time.RFC3339Nano), m)
+		},
+		DeliveryCount: func(v uint32, m *message.Message) {
+			set("sbdeliverycount")(int64(v), m)
+		},
+		SequenceNumber: func(v int64, m *message.Message) {
+			set("sbsequencenumber")(v, m)
+		},
+	}
+}
 
 // limitMessages forwards at most n messages from in, then calls cancel to stop
 // further intake and closes the returned channel once the nth message has been
