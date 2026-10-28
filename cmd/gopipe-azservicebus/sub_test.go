@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v3"
 )
 
 // TestLimitMessages_StopsAtN is a pure unit test (no network) for the helper
@@ -171,11 +173,50 @@ func TestBrokerPropsMapping_AttributeNames(t *testing.T) {
 	sp.DeadLetterErrorDescription("too many", msg)
 	sp.EnqueuedTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), msg)
 	sp.DeliveryCount(10, msg)
-	sp.SequenceNumber(7, msg)
+	const seq = int64(1)<<60 + 1 // above 2^53
+	sp.SequenceNumber(seq, msg)
 
 	assert.Equal(t, "MaxDeliveryCountExceeded", msg.Attributes["sbdeadletterreason"])
 	assert.Equal(t, "too many", msg.Attributes["sbdeadlettererrordescription"])
 	assert.Equal(t, "2026-01-02T03:04:05Z", msg.Attributes["sbenqueuedtime"])
 	assert.Equal(t, int64(10), msg.Attributes["sbdeliverycount"])
-	assert.Equal(t, int64(7), msg.Attributes["sbsequencenumber"])
+	assert.Equal(t, "1152921504606846977", msg.Attributes["sbsequencenumber"])
+	got, err := strconv.ParseInt(msg.Attributes["sbsequencenumber"].(string), 10, 64)
+	require.NoError(t, err)
+	assert.Equal(t, seq, got)
+}
+
+func TestSubscriberConfig_BrokerPropsFlag(t *testing.T) {
+	run := func(t *testing.T, args ...string) servicebus.SubscriberConfig {
+		t.Helper()
+		var cfg servicebus.SubscriberConfig
+		app := &cli.Command{
+			Name:  "test",
+			Flags: []cli.Flag{sbPeekFlag, sbDlqFlag, sbTransferDlqFlag, sbBrokerPropsFlag},
+			Action: func(_ context.Context, cmd *cli.Command) error {
+				cfg = subscriberConfig(cmd, 0)
+				return nil
+			},
+		}
+		require.NoError(t, app.Run(context.Background(), append([]string{"test"}, args...)))
+		return cfg
+	}
+
+	t.Run("enabled", func(t *testing.T) {
+		p := run(t, "--broker-props").Properties
+		assert.NotNil(t, p.DeadLetterReason)
+		assert.NotNil(t, p.DeadLetterErrorDescription)
+		assert.NotNil(t, p.EnqueuedTime)
+		assert.NotNil(t, p.DeliveryCount)
+		assert.NotNil(t, p.SequenceNumber)
+	})
+
+	t.Run("disabled by default", func(t *testing.T) {
+		p := run(t).Properties
+		assert.Nil(t, p.DeadLetterReason)
+		assert.Nil(t, p.DeadLetterErrorDescription)
+		assert.Nil(t, p.EnqueuedTime)
+		assert.Nil(t, p.DeliveryCount)
+		assert.Nil(t, p.SequenceNumber)
+	})
 }
