@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
+	"time"
 
 	servicebus "github.com/fxsml/gopipe-azservicebus"
 	"github.com/fxsml/gopipe-azservicebus/internal/jsonl"
@@ -50,6 +52,10 @@ var (
 		Name:  "transfer-dlq",
 		Usage: "receive from the transfer dead-letter sub-queue instead of the main queue/subscription",
 	}
+	sbBrokerPropsFlag = &cli.BoolFlag{
+		Name:  "broker-props",
+		Usage: "add broker metadata (dead-letter reason/description, enqueued time, delivery count, sequence number as a string) as sb* extension attributes; off by default because piping the output into pub publishes them as message properties",
+	}
 
 	// subscribe command
 
@@ -89,23 +95,7 @@ var (
 				return fmt.Errorf("create ServiceBus client: %w", err)
 			}
 
-			subQueue := servicebus.SubQueueNone
-			switch {
-			case cmd.Bool("dlq"):
-				subQueue = servicebus.SubQueueDeadLetter
-			case cmd.Bool("transfer-dlq"):
-				subQueue = servicebus.SubQueueTransferDeadLetter
-			}
-
-			cfg := servicebus.SubscriberConfig{
-				EnablePeekMode: cmd.Bool("peek"),
-				SubQueue:       subQueue,
-			}
-			if limit > 0 {
-				// MaxInFlight=1 ensures no next message is prefetched before Ack(),
-				// so limitMessages below can stop intake cleanly at the limit.
-				cfg.MaxInFlight = 1
-			}
+			cfg := subscriberConfig(cmd, limit)
 
 			// Create subscriber for this subscription
 			subscriber, err := servicebus.NewSubscriber(sbClient, subscription, cliPipeline, cfg)
@@ -148,6 +138,7 @@ var (
 			sbLimitFlag,
 			sbOutputFileFlag,
 			sbPeekFlag,
+			sbBrokerPropsFlag,
 		},
 		MutuallyExclusiveFlags: []cli.MutuallyExclusiveFlags{
 			{
@@ -159,6 +150,63 @@ var (
 		},
 	}
 )
+
+// subscriberConfig builds the subscriber config from the sub command's flags.
+func subscriberConfig(cmd *cli.Command, limit int) servicebus.SubscriberConfig {
+	subQueue := servicebus.SubQueueNone
+	switch {
+	case cmd.Bool("dlq"):
+		subQueue = servicebus.SubQueueDeadLetter
+	case cmd.Bool("transfer-dlq"):
+		subQueue = servicebus.SubQueueTransferDeadLetter
+	}
+
+	cfg := servicebus.SubscriberConfig{
+		EnablePeekMode: cmd.Bool("peek"),
+		SubQueue:       subQueue,
+	}
+	if cmd.Bool("broker-props") {
+		cfg.Properties = brokerPropsMapping()
+	}
+	if limit > 0 {
+		// MaxInFlight=1 ensures no next message is prefetched before Ack(),
+		// so limitMessages can stop intake cleanly at the limit.
+		cfg.MaxInFlight = 1
+	}
+	return cfg
+}
+
+// brokerPropsMapping maps broker metadata onto CloudEvents extension attributes.
+// Names are lowercase a-z0-9 as required by the CloudEvents spec.
+func brokerPropsMapping() servicebus.SubscriberProperties {
+	return servicebus.SubscriberProperties{
+		DeadLetterReason: func(v string, m *message.Message) {
+			setAttr(m, "sbdeadletterreason", v)
+		},
+		DeadLetterErrorDescription: func(v string, m *message.Message) {
+			setAttr(m, "sbdeadlettererrordescription", v)
+		},
+		EnqueuedTime: func(v time.Time, m *message.Message) {
+			setAttr(m, "sbenqueuedtime", v.UTC().Format(time.RFC3339Nano))
+		},
+		DeliveryCount: func(v uint32, m *message.Message) {
+			setAttr(m, "sbdeliverycount", int64(v))
+		},
+		// Emitted as a string: sequence numbers are int64 and can exceed 2^53 on
+		// partitioned entities, so a JSON number would lose precision in jq/JavaScript.
+		SequenceNumber: func(v int64, m *message.Message) {
+			setAttr(m, "sbsequencenumber", strconv.FormatInt(v, 10))
+		},
+	}
+}
+
+// setAttr sets an attribute on m, allocating the attribute map if needed.
+func setAttr(m *message.Message, name string, v any) {
+	if m.Attributes == nil {
+		m.Attributes = message.Attributes{}
+	}
+	m.Attributes[name] = v
+}
 
 // limitMessages forwards at most n messages from in, then calls cancel to stop
 // further intake and closes the returned channel once the nth message has been

@@ -129,6 +129,16 @@ type SubscriberProperties struct {
 	// Populated regardless of which sub-queue is being read; typically only useful when
 	// SubQueue is SubQueueDeadLetter or SubQueueTransferDeadLetter.
 	DeadLetterErrorDescription func(string, *message.Message)
+
+	// EnqueuedTime is the UTC time when the broker accepted and stored the message.
+	EnqueuedTime func(time.Time, *message.Message)
+
+	// DeliveryCount is the number of times the broker has delivered the message.
+	DeliveryCount func(uint32, *message.Message)
+
+	// SequenceNumber is the unique number the broker assigned to the message. It can be
+	// used to deduplicate messages, e.g. when peek mode restarts after a reconnect.
+	SequenceNumber func(int64, *message.Message)
 }
 
 func (sp SubscriberProperties) apply(sbMsg *azservicebus.ReceivedMessage, msg *message.Message) {
@@ -161,6 +171,15 @@ func (sp SubscriberProperties) apply(sbMsg *azservicebus.ReceivedMessage, msg *m
 	}
 	if sp.DeadLetterErrorDescription != nil && sbMsg.DeadLetterErrorDescription != nil {
 		sp.DeadLetterErrorDescription(*sbMsg.DeadLetterErrorDescription, msg)
+	}
+	if sp.EnqueuedTime != nil && sbMsg.EnqueuedTime != nil {
+		sp.EnqueuedTime(*sbMsg.EnqueuedTime, msg)
+	}
+	if sp.DeliveryCount != nil {
+		sp.DeliveryCount(sbMsg.DeliveryCount, msg)
+	}
+	if sp.SequenceNumber != nil && sbMsg.SequenceNumber != nil {
+		sp.SequenceNumber(*sbMsg.SequenceNumber, msg)
 	}
 }
 
